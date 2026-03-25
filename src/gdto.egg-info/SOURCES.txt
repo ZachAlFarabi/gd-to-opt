@@ -1,0 +1,17 @@
+pyproject.toml
+src/gdto/__init__.py
+src/gdto/anisotropy.py
+src/gdto/filters.py
+src/gdto/gd_loop.py
+src/gdto/guided_nsga2.py
+src/gdto/mesh_material.py
+src/gdto/objectives.py
+src/gdto/simp.py
+src/gdto/surrogate.py
+src/gdto/verify.py
+src/gdto.egg-info/PKG-INFO
+src/gdto.egg-info/SOURCES.txt
+src/gdto.egg-info/dependency_links.txt
+src/gdto.egg-info/requires.txt
+src/gdto.egg-info/top_level.txt
+tests/test_mesh_material.py
