@@ -7,7 +7,7 @@ LPBF metals. Symmetry axis = 3 (build direction Z).
 Theoretical basis:
     Ivey, Carey & Ayranci (2017), Chapter 7 in Handbook of Advances in
     Braided Composite Materials, Elsevier/Woodhead Publishing.
-    Equations (7.23), (7.50)–(7.60) specialised to transverse isotropy
+    Equations (7.23), (7.50)-(7.60) specialised to transverse isotropy
     with isotropic plane = 1-2 (XY), unique axis = 3 (Z).
 
 Source convention:
