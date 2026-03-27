@@ -166,6 +166,8 @@ class MaterialModel:
         """
         assert self.E_perp > 0 and self.E_par > 0 and self.G_par > 0, \
             "Moduli must be positive."
+        assert self.rho > 0, \
+            f"Density rho must be positive, got {self.rho}."
         assert abs(self.nu_perp) < 1.0, \
             f"|nu_perp| = {abs(self.nu_perp):.3f} must be < 1."
 
@@ -290,8 +292,9 @@ class MaterialModel:
         np.ndarray
             Shape (6, 6) if rho_e is scalar, or (n_elem, 6, 6) if array.
         """
+        rho_e = np.clip(np.asarray(rho_e), 0.0, 1.0)
         E_min = E_min_factor  # normalised — C0 already in Pa
-        scale = E_min + np.asarray(rho_e) ** p * (1.0 - E_min)
+        scale = E_min + rho_e ** p * (1.0 - E_min)
 
         if np.ndim(scale) == 0:
             return float(scale) * self.C0
@@ -392,6 +395,8 @@ class VoxelMesh:
     def __post_init__(self) -> None:
         assert self.nx > 0 and self.ny > 0 and self.nz > 0, \
             "Element counts must be positive integers."
+        assert self.lx > 0 and self.ly > 0 and self.lz > 0, \
+            "Domain dimensions lx, ly, lz must be positive."
         self._build_mesh()
 
     def _build_mesh(self) -> None:
@@ -661,6 +666,7 @@ class FEAssembler:
         assert rho.shape == (self.mesh.n_elem,), \
             f"rho must have shape ({self.mesh.n_elem},), got {rho.shape}"
 
+        rho    = np.clip(rho, 0.0, 1.0)
         E_min  = E_min_factor
         scales = E_min + rho ** p * (1.0 - E_min)  # (n_elem,)
 
@@ -739,6 +745,16 @@ class BoundaryConditions:
     f:          np.ndarray = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        if self.load_direction not in (0, 1, 2):
+            raise ValueError(
+                f"load_direction must be 0 (X), 1 (Y), or 2 (Z), "
+                f"got {self.load_direction}."
+            )
+        if self.load_face in self.fixed_faces:
+            raise ValueError(
+                f"load_face '{self.load_face}' is also in fixed_faces "
+                f"{self.fixed_faces} — load cannot be applied to fixed nodes."
+            )
         self.fixed_dofs = self._get_fixed_dofs()
         self.free_dofs  = np.setdiff1d(
             np.arange(self.mesh.n_dof), self.fixed_dofs
@@ -888,7 +904,6 @@ class BoundaryConditions:
 # build_problem — public API consumed by chunk 2
 # ---------------------------------------------------------------------------
 
-from dataclasses import dataclass as _dc
 from typing import NamedTuple
 
 
@@ -973,8 +988,8 @@ def build_problem(
         load_magnitude=load_magnitude,
     )
 
-    assert solver in ("direct", "cg"), \
-        f"solver must be 'direct' or 'cg', got '{solver}'"
+    if solver not in ("direct", "cg"):
+        raise ValueError(f"solver must be 'direct' or 'cg', got '{solver}'")
 
     return ProblemData(
         mesh=mesh,

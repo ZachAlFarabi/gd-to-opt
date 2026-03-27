@@ -305,7 +305,7 @@ def test_build_problem_fields():
     assert p.solver == "direct"
 
 def test_build_problem_invalid_solver():
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         build_problem(material="Ti64", nx=4, ny=4, nz=4, solver="mumps")
 
 @pytest.mark.parametrize("mat", ["Ti64", "AlSi10Mg", "316L"])
