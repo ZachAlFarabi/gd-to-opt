@@ -691,3 +691,295 @@ class FEAssembler:
             f"| nnz\u2248{nnz_est:,}  "
             f"| mem\u2248{mem_mb:.0f} MB"
         )
+
+# ---------------------------------------------------------------------------
+# BoundaryConditions
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BoundaryConditions:
+    """
+    Boundary conditions for the FE problem, specified via face selectors.
+
+    Face naming convention (axis-aligned unit cube, generalises to lx,ly,lz):
+        xmin / xmax — faces perpendicular to X axis
+        ymin / ymax — faces perpendicular to Y axis
+        zmin / zmax — faces perpendicular to Z axis (build direction)
+
+    Default TO setup:
+        Fixed face : zmin  (simulates the build plate)
+        Load face  : zmax  (distributed load in -Z direction)
+
+    Parameters
+    ----------
+    mesh : VoxelMesh
+        The mesh to apply BCs to.
+    fixed_faces : list[str]
+        Face names whose nodes are fully fixed (all 3 DOFs constrained).
+        Default: ['zmin']
+    load_face : str
+        Face name where the distributed load is applied.
+        Default: 'zmax'
+    load_direction : int
+        DOF direction of the load: 0=X, 1=Y, 2=Z. Default: 2 (Z, downward).
+    load_magnitude : float
+        Total load magnitude [N]. Distributed uniformly over load_face nodes.
+        Default: -1.0 (unit compressive load in Z direction).
+    """
+
+    mesh:           VoxelMesh
+    fixed_faces:    list  = field(default_factory=lambda: ['zmin'])
+    load_face:      str   = 'zmax'
+    load_direction: int   = 2
+    load_magnitude: float = -1.0
+
+    # Computed on post-init
+    fixed_dofs: np.ndarray = field(init=False, repr=False)
+    free_dofs:  np.ndarray = field(init=False, repr=False)
+    f:          np.ndarray = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.fixed_dofs = self._get_fixed_dofs()
+        self.free_dofs  = np.setdiff1d(
+            np.arange(self.mesh.n_dof), self.fixed_dofs
+        )
+        self.f = self._build_load_vector()
+
+    def _face_node_ids(self, face: str) -> np.ndarray:
+        """
+        Return node indices on the named face.
+
+        Parameters
+        ----------
+        face : str
+            One of 'xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax'.
+
+        Returns
+        -------
+        np.ndarray of int — global node indices on that face.
+        """
+        mesh = self.mesh
+        nnx  = mesh.nx + 1
+        nny  = mesh.ny + 1
+        nnz  = mesh.nz + 1
+
+        # Node index function: n(i,j,k) = i*nny*nnz + j*nnz + k
+        # (C-order, z-fastest — matches VoxelMesh._build_mesh)
+        ii = np.arange(nnx)
+        jj = np.arange(nny)
+        kk = np.arange(nnz)
+
+        face_map = {
+            'xmin': (np.array([0]),  jj,                  kk),
+            'xmax': (np.array([nnx-1]), jj,               kk),
+            'ymin': (ii,             np.array([0]),        kk),
+            'ymax': (ii,             np.array([nny-1]),    kk),
+            'zmin': (ii,             jj,                   np.array([0])),
+            'zmax': (ii,             jj,                   np.array([nnz-1])),
+        }
+        if face not in face_map:
+            raise ValueError(
+                f"Unknown face '{face}'. "
+                f"Valid options: {list(face_map.keys())}"
+            )
+        fi, fj, fk = face_map[face]
+        gi, gj, gk = np.meshgrid(fi, fj, fk, indexing='ij')
+        return (gi.ravel() * nny * nnz
+                + gj.ravel() * nnz
+                + gk.ravel()).astype(np.int32)
+
+    def _get_fixed_dofs(self) -> np.ndarray:
+        """
+        Return sorted array of all fixed DOF indices.
+
+        All 3 DOFs (X, Y, Z displacement) are fixed for every node
+        on every face in self.fixed_faces.
+        """
+        node_ids = np.concatenate([
+            self._face_node_ids(f) for f in self.fixed_faces
+        ])
+        node_ids = np.unique(node_ids)
+        # Expand to DOFs: node n -> DOFs [3n, 3n+1, 3n+2]
+        dofs = np.stack([
+            3 * node_ids,
+            3 * node_ids + 1,
+            3 * node_ids + 2,
+        ], axis=1).ravel()
+        return np.sort(dofs)
+
+    def _build_load_vector(self) -> np.ndarray:
+        """
+        Build the global load vector f.
+
+        The total load (self.load_magnitude) is distributed uniformly
+        over all nodes on self.load_face in self.load_direction.
+
+        Returns
+        -------
+        np.ndarray, shape (n_dof,)
+        """
+        f        = np.zeros(self.mesh.n_dof)
+        node_ids = self._face_node_ids(self.load_face)
+        dofs     = 3 * node_ids + self.load_direction
+        f[dofs]  = self.load_magnitude / len(node_ids)
+        return f
+
+    def apply(self, K: sp.csc_matrix) -> tuple[sp.csc_matrix, np.ndarray]:
+        """
+        Apply Dirichlet BCs to K and f by DOF elimination.
+
+        For homogeneous Dirichlet BCs (u_fixed = 0):
+            K_ff = K[free_dofs, :][:, free_dofs]
+            f_f  = f[free_dofs]
+
+        This is the elimination method (Ivey et al. equivalent: condensation).
+        The reduced system K_ff u_f = f_f is SPD and ready for spsolve.
+
+        Parameters
+        ----------
+        K : sp.csc_matrix
+            Global stiffness matrix, shape (n_dof, n_dof).
+
+        Returns
+        -------
+        K_ff : sp.csc_matrix
+            Reduced stiffness matrix, shape (n_free, n_free).
+        f_f : np.ndarray
+            Reduced load vector, shape (n_free,).
+        """
+        fd = self.free_dofs
+        K_ff = K[fd, :][:, fd].tocsc()
+        K_ff = (K_ff + K_ff.T) * 0.5   # enforce exact symmetry after sparse slicing
+        f_f  = self.f[fd]
+        return K_ff, f_f
+
+    def expand(self, u_free: np.ndarray) -> np.ndarray:
+        """
+        Expand the reduced displacement vector back to full size.
+
+        Fixed DOFs are set to zero (homogeneous Dirichlet).
+
+        Parameters
+        ----------
+        u_free : np.ndarray, shape (n_free,)
+            Solution from the reduced system.
+
+        Returns
+        -------
+        u : np.ndarray, shape (n_dof,)
+        """
+        u = np.zeros(self.mesh.n_dof)
+        u[self.free_dofs] = u_free
+        return u
+
+    def summary(self) -> str:
+        return (
+            f"BoundaryConditions:"
+            f" fixed_faces={self.fixed_faces}"
+            f" | fixed_dofs={len(self.fixed_dofs):,}"
+            f" | free_dofs={len(self.free_dofs):,}"
+            f" | load_face={self.load_face}"
+            f" | load_dir={self.load_direction}"
+            f" | load_mag={self.load_magnitude}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# build_problem — public API consumed by chunk 2
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dc
+from typing import NamedTuple
+
+
+class ProblemData(NamedTuple):
+    """
+    Complete FE problem definition passed from chunk 1 to chunk 2.
+
+    All objects are fully constructed and validated. Chunk 2 (SIMP) calls
+    assembler.assemble_K(rho) on each iteration, then bc.apply(K) to get
+    the reduced system, solves it, and calls bc.expand(u_free) to recover
+    the full displacement field.
+
+    Fields
+    ------
+    mesh       : VoxelMesh       — geometry and DOF map
+    material   : MaterialModel   — C0 stiffness and SIMP interface
+    assembler  : FEAssembler     — Ke0 and K assembly
+    bc         : BoundaryConditions — fixed DOFs, load vector, apply/expand
+    solver     : str             — 'direct' or 'cg'
+    """
+    mesh:      VoxelMesh
+    material:  MaterialModel
+    assembler: FEAssembler
+    bc:        BoundaryConditions
+    solver:    str
+
+
+def build_problem(
+    material:       str   = "Ti64",
+    nx:             int   = 40,
+    ny:             int   = 40,
+    nz:             int   = 40,
+    lx:             float = 1.0,
+    ly:             float = 1.0,
+    lz:             float = 1.0,
+    fixed_faces:    list  = None,
+    load_face:      str   = "zmax",
+    load_direction: int   = 2,
+    load_magnitude: float = -1.0,
+    solver:         str   = "direct",
+) -> ProblemData:
+    """
+    Construct a fully-specified FE problem ready for the SIMP inner loop.
+
+    This is the single entry point that chunk 2 calls. All chunk 1 classes
+    are constructed, validated, and wired together here.
+
+    Parameters
+    ----------
+    material : str
+        Material preset — 'Ti64', 'AlSi10Mg', or '316L'.
+    nx, ny, nz : int
+        Mesh resolution (elements per axis). Default 40.
+    lx, ly, lz : float
+        Physical domain size [m]. Default 1.0 (unit cube).
+    fixed_faces : list[str]
+        Faces with fully fixed nodes. Default ['zmin'].
+    load_face : str
+        Face where load is applied. Default 'zmax'.
+    load_direction : int
+        Load DOF direction: 0=X, 1=Y, 2=Z. Default 2.
+    load_magnitude : float
+        Total load [N]. Negative = compressive. Default -1.0.
+    solver : str
+        Linear solver backend: 'direct' (spsolve) or 'cg'. Default 'direct'.
+
+    Returns
+    -------
+    ProblemData — named tuple with mesh, material, assembler, bc, solver.
+    """
+    if fixed_faces is None:
+        fixed_faces = ['zmin']
+
+    mat  = MaterialModel.from_preset(material)
+    mesh = VoxelMesh(nx=nx, ny=ny, nz=nz, lx=lx, ly=ly, lz=lz)
+    asm  = FEAssembler(mesh, mat)
+    bc   = BoundaryConditions(
+        mesh=mesh,
+        fixed_faces=fixed_faces,
+        load_face=load_face,
+        load_direction=load_direction,
+        load_magnitude=load_magnitude,
+    )
+
+    assert solver in ("direct", "cg"), \
+        f"solver must be 'direct' or 'cg', got '{solver}'"
+
+    return ProblemData(
+        mesh=mesh,
+        material=mat,
+        assembler=asm,
+        bc=bc,
+        solver=solver,
+    )

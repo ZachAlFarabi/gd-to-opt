@@ -1,0 +1,183 @@
+# =============================================================================
+# GD-TO Optimisation — Default Configuration
+# =============================================================================
+# All runtime parameters live here. Never hardcode these values in source code.
+# Units: SI throughout — Pa (stress/modulus), m (length), N (force), kg (mass).
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Material
+# -----------------------------------------------------------------------------
+material:
+  name: Ti64              # Options: Ti64 | AlSi10Mg | 316L
+  condition: as_built     # Options: as_built | heat_treated (heat_treated NOT YET IMPLEMENTED)
+
+  # Engineering constants — E values from user CSV (as-built XY/Z rows).
+  # nu and G from LPBF literature (see Decision2_MaterialModel.docx).
+  # Override here to use custom measured values.
+  # Units: Pa for moduli, dimensionless for nu.
+  Ti64:
+    E_perp:  108.0e9      # XY plane Young's modulus, ±20 GPa — CSV row 9 XY
+    E_par:   105.0e9      # Z axis Young's modulus,   ±20 GPa — CSV row 10 Z
+    nu_perp: 0.342        # in-plane Poisson ratio    — Pantawane et al. 2022
+    nu_par:  0.330        # cross-plane Poisson ratio — Pantawane et al. 2022
+    G_par:   47.0e9       # out-of-plane shear modulus — Pantawane et al. 2022
+    rho:     4400.0       # density kg/m³ — CSV row 3
+
+  AlSi10Mg:
+    E_perp:  75.0e9       # XY plane, ±10 GPa — CSV row 9 XY
+    E_par:   70.0e9       # Z axis,   ±30 GPa — CSV row 10 Z  [WARNING: large uncertainty]
+    nu_perp: 0.330        # Sert et al. 2019
+    nu_par:  0.310        # Sert et al. 2019
+    G_par:   25.0e9       # Arjunan et al. 2020
+    rho:     2680.0       # density kg/m³ — CSV row 3
+
+  316L:
+    E_perp:  197.0e9      # XY plane, ±5 GPa  — CSV row 9 XY
+    E_par:   190.0e9      # Z axis,   ±10 GPa — CSV row 10 Z
+    nu_perp: 0.280        # SLM 316L literature
+    nu_par:  0.260        # Chao et al. 2022
+    G_par:   77.0e9       # Li et al. 2021
+    rho:     7990.0       # density kg/m³ — CSV row 3
+
+
+# -----------------------------------------------------------------------------
+# Mesh (Decision 3)
+# -----------------------------------------------------------------------------
+mesh:
+  nx: 40                  # elements along X
+  ny: 40                  # elements along Y
+  nz: 40                  # elements along Z (build direction)
+  lx: 1.0                 # domain size X [m]
+  ly: 1.0                 # domain size Y [m]
+  lz: 1.0                 # domain size Z [m]
+  # Resolution guide:
+  #   20^3 — dev/smoke tests (~28k DOFs, <1s solve)
+  #   40^3 — default         (~207k DOFs, 5-15s solve)
+  #   60^3 — high quality    (~681k DOFs, 60-120s solve, chunk 4 verify only)
+
+
+# -----------------------------------------------------------------------------
+# Boundary Conditions (Decision 5)
+# -----------------------------------------------------------------------------
+bc:
+  fixed_faces: [zmin]     # faces with all DOFs fixed (build plate)
+  load_face: zmax         # face where load is applied
+  load_direction: 2       # 0=X, 1=Y, 2=Z
+  load_magnitude: -1.0    # total load [N], negative = compressive
+
+
+# -----------------------------------------------------------------------------
+# Linear Solver (Decision 6)
+# -----------------------------------------------------------------------------
+solver: direct            # direct = spsolve/SuperLU | cg = conjugate gradient
+                          # Use direct for <=40^3, consider cg for 60^3+
+
+
+# -----------------------------------------------------------------------------
+# SIMP Inner Loop (Chunk 2 — not yet implemented)
+# -----------------------------------------------------------------------------
+simp:
+  p: 3.0                  # penalisation exponent (standard = 3)
+  E_min_factor: 1.0e-9    # void stiffness floor (fraction of E_perp)
+  max_iter: 100           # maximum SIMP iterations per GD evaluation
+  tol: 1.0e-3             # convergence: max(|rho_new - rho_old|) < tol
+  update_scheme: OC       # OC = Optimality Criteria | MMA = Method of Moving Asymptotes
+  volume_fraction: 0.4    # target volume fraction (initial and constraint)
+
+  # OC update parameters
+  oc:
+    move: 0.2             # max density change per iteration
+    eta: 0.5              # damping exponent
+
+  # MMA parameters (used if update_scheme: MMA)
+  mma:
+    move: 0.2
+
+
+# -----------------------------------------------------------------------------
+# Sensitivity / Density Filter (Chunk 3 — not yet implemented)
+# -----------------------------------------------------------------------------
+filter:
+  radius: 1.5             # filter radius in element lengths
+  type: sensitivity       # sensitivity | density | heaviside
+  beta: 1.0               # Heaviside projection sharpness (if type: heaviside)
+
+
+# -----------------------------------------------------------------------------
+# Overhang / Printability (Chunk 3 — not yet implemented)
+# -----------------------------------------------------------------------------
+overhang:
+  enabled: true
+  build_direction: [0, 0, 1]    # unit vector along build axis (Z up)
+  max_angle_deg: 45.0           # self-supporting angle threshold
+  penalty_weight: 0.5           # overhang penalty weight in objective
+
+
+# -----------------------------------------------------------------------------
+# Geometry Reconstruction (Chunk 4 — not yet implemented)
+# -----------------------------------------------------------------------------
+reconstruct:
+  threshold: 0.5          # density threshold for marching cubes isosurface
+  smooth_iterations: 2    # Laplacian smoothing passes on reconstructed mesh
+
+
+# -----------------------------------------------------------------------------
+# GD Outer Loop / NSGA-II (Chunk 5 — not yet implemented)
+# -----------------------------------------------------------------------------
+gd:
+  population_size: 50     # NSGA-II population per generation
+  n_generations: 100      # maximum generations
+  seed: 42                # random seed for reproducibility
+
+  # Design variable bounds for the GD outer loop
+  design_variables:
+    volume_fraction:
+      min: 0.2
+      max: 0.6
+    overhang_penalty_weight:
+      min: 0.0
+      max: 2.0
+    build_orientation_deg:   # rotation of build axis in XZ plane
+      min: 0.0
+      max: 90.0
+    min_feature_size:        # in element lengths
+      min: 1.0
+      max: 4.0
+
+
+# -----------------------------------------------------------------------------
+# Objectives (Chunk 6 — not yet implemented)
+# -----------------------------------------------------------------------------
+objectives:
+  # All four objectives are minimised (signs handled internally)
+  compliance:
+    weight: 1.0
+  mass:
+    weight: 1.0
+  support_volume:
+    weight: 1.0
+  build_cost:
+    weight: 1.0
+
+
+# -----------------------------------------------------------------------------
+# ML Surrogate (Chunks 8-9 — not yet implemented)
+# -----------------------------------------------------------------------------
+surrogate:
+  type: GP                # GP = Gaussian Process | NN = Neural Network | hybrid
+  n_initial_samples: 20   # true evaluations before surrogate kicks in
+  acquisition: EHVI       # Expected Hypervolume Improvement
+  update_interval: 5      # retrain surrogate every N GD generations
+
+
+# -----------------------------------------------------------------------------
+# Output / Reporting (Chunk 10 — not yet implemented)
+# -----------------------------------------------------------------------------
+output:
+  dir: outputs/
+  save_stl: true
+  save_density_field: true   # save rho as .npy for post-processing
+  save_pareto_front: true
+  report_format: pdf         # pdf | html

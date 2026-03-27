@@ -17,7 +17,10 @@ Verifies:
 import numpy as np
 import pytest
 import scipy.sparse as sp
-from gdto.mesh_material import MaterialModel, VoxelMesh, FEAssembler
+from gdto.mesh_material import (
+    MaterialModel, VoxelMesh, FEAssembler,
+    BoundaryConditions, build_problem, ProblemData
+)
 
 
 MATERIALS = ["Ti64", "AlSi10Mg", "316L"]
@@ -225,3 +228,87 @@ def test_assemble_K_void(small_problem):
         diff.data, 0.0, atol=1e-3,
         err_msg="K_void is not E_min * K_full to required tolerance"
     )
+
+# ── BoundaryConditions tests ──────────────────────────────────────────────
+
+@pytest.fixture
+def small_bc():
+    mesh = VoxelMesh(nx=4, ny=4, nz=4)
+    return BoundaryConditions(mesh=mesh)
+
+def test_bc_fixed_dofs_not_empty(small_bc):
+    assert len(small_bc.fixed_dofs) > 0
+
+def test_bc_free_dofs_partition(small_bc):
+    """fixed + free must partition [0, n_dof) without overlap."""
+    mesh = small_bc.mesh
+    all_dofs = np.arange(mesh.n_dof)
+    combined = np.sort(np.concatenate([small_bc.fixed_dofs, small_bc.free_dofs]))
+    np.testing.assert_array_equal(combined, all_dofs)
+
+def test_bc_load_vector_shape(small_bc):
+    assert small_bc.f.shape == (small_bc.mesh.n_dof,)
+
+def test_bc_load_vector_sum(small_bc):
+    """Total load must equal load_magnitude."""
+    np.testing.assert_allclose(
+        small_bc.f.sum(), small_bc.load_magnitude, rtol=1e-10
+    )
+
+def test_bc_load_not_on_fixed(small_bc):
+    """No load should be applied to fixed DOFs."""
+    assert np.all(small_bc.f[small_bc.fixed_dofs] == 0.0)
+
+def test_bc_apply_reduces_K(small_bc):
+    """K_ff must be smaller than K by exactly the number of fixed DOFs."""
+    mat = MaterialModel.from_preset("Ti64")
+    asm = FEAssembler(small_bc.mesh, mat)
+    K   = asm.assemble_K(np.ones(small_bc.mesh.n_elem))
+    K_ff, f_f = small_bc.apply(K)
+    n_free = len(small_bc.free_dofs)
+    assert K_ff.shape == (n_free, n_free)
+    assert f_f.shape  == (n_free,)
+
+def test_bc_apply_K_ff_symmetric(small_bc):
+    mat = MaterialModel.from_preset("Ti64")
+    asm = FEAssembler(small_bc.mesh, mat)
+    K   = asm.assemble_K(np.ones(small_bc.mesh.n_elem))
+    K_ff, _ = small_bc.apply(K)
+    diff = K_ff - K_ff.T
+    assert abs(diff).max() < 1e-6
+
+def test_bc_expand(small_bc):
+    """expand() must return full-size vector with zeros at fixed DOFs."""
+    n_free = len(small_bc.free_dofs)
+    u_free = np.ones(n_free)
+    u_full = small_bc.expand(u_free)
+    assert u_full.shape == (small_bc.mesh.n_dof,)
+    assert np.all(u_full[small_bc.fixed_dofs] == 0.0)
+
+def test_bc_invalid_face_raises():
+    mesh = VoxelMesh(nx=4, ny=4, nz=4)
+    with pytest.raises(ValueError):
+        BoundaryConditions(mesh=mesh, fixed_faces=['invalid_face'])
+
+# ── build_problem tests ───────────────────────────────────────────────────
+
+def test_build_problem_returns_problemdata():
+    p = build_problem(material="Ti64", nx=4, ny=4, nz=4)
+    assert isinstance(p, ProblemData)
+
+def test_build_problem_fields():
+    p = build_problem(material="AlSi10Mg", nx=4, ny=4, nz=4)
+    assert isinstance(p.mesh,      VoxelMesh)
+    assert isinstance(p.material,  MaterialModel)
+    assert isinstance(p.assembler, FEAssembler)
+    assert isinstance(p.bc,        BoundaryConditions)
+    assert p.solver == "direct"
+
+def test_build_problem_invalid_solver():
+    with pytest.raises(AssertionError):
+        build_problem(material="Ti64", nx=4, ny=4, nz=4, solver="mumps")
+
+@pytest.mark.parametrize("mat", ["Ti64", "AlSi10Mg", "316L"])
+def test_build_problem_all_materials(mat):
+    p = build_problem(material=mat, nx=4, ny=4, nz=4)
+    assert p.material.name == mat
