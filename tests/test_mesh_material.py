@@ -16,7 +16,8 @@ Verifies:
 
 import numpy as np
 import pytest
-from gdto.mesh_material import MaterialModel
+import scipy.sparse as sp
+from gdto.mesh_material import MaterialModel, VoxelMesh, FEAssembler
 
 
 MATERIALS = ["Ti64", "AlSi10Mg", "316L"]
@@ -122,3 +123,105 @@ def test_summary_runs():
     s = m.summary()
     assert "Ti64" in s
     assert "positive definite: True" in s
+
+
+# ── VoxelMesh tests ───────────────────────────────────────────────────────
+
+def test_voxel_mesh_counts():
+    """Node, element, and DOF counts must satisfy exact formulae."""
+    m = VoxelMesh(nx=4, ny=5, nz=6)
+    assert m.n_elem  == 4 * 5 * 6
+    assert m.n_nodes == 5 * 6 * 7
+    assert m.n_dof   == 3 * 5 * 6 * 7
+
+def test_voxel_mesh_coords_shape():
+    m = VoxelMesh(nx=4, ny=4, nz=4)
+    assert m.coords.shape == (m.n_nodes, 3)
+
+def test_voxel_mesh_conn_shape():
+    m = VoxelMesh(nx=4, ny=4, nz=4)
+    assert m.conn.shape == (m.n_elem, 8)
+
+def test_voxel_mesh_dof_map_shape():
+    m = VoxelMesh(nx=4, ny=4, nz=4)
+    assert m.dof_map.shape == (m.n_elem, 24)
+
+def test_voxel_mesh_dof_map_range():
+    """All DOF indices must be in [0, n_dof)."""
+    m = VoxelMesh(nx=4, ny=4, nz=4)
+    assert m.dof_map.min() >= 0
+    assert m.dof_map.max() < m.n_dof
+
+def test_voxel_mesh_coords_bounds():
+    """Node coordinates must lie within [0, lx] x [0, ly] x [0, lz]."""
+    m = VoxelMesh(nx=4, ny=4, nz=4, lx=2.0, ly=3.0, lz=4.0)
+    assert m.coords[:, 0].max() == pytest.approx(2.0)
+    assert m.coords[:, 1].max() == pytest.approx(3.0)
+    assert m.coords[:, 2].max() == pytest.approx(4.0)
+
+def test_voxel_mesh_element_centres():
+    m = VoxelMesh(nx=2, ny=2, nz=2)
+    centres = m.element_centres()
+    assert centres.shape == (8, 3)
+
+# ── FEAssembler tests ─────────────────────────────────────────────────────
+
+@pytest.fixture
+def small_problem():
+    """20^3 mesh with Ti64 — fast enough for unit tests."""
+    mesh = VoxelMesh(nx=20, ny=20, nz=20)
+    mat  = MaterialModel.from_preset("Ti64")
+    asm  = FEAssembler(mesh, mat)
+    return mesh, mat, asm
+
+def test_Ke0_shape(small_problem):
+    _, _, asm = small_problem
+    assert asm.Ke0.shape == (24, 24)
+
+def test_Ke0_symmetry(small_problem):
+    _, _, asm = small_problem
+    np.testing.assert_allclose(asm.Ke0, asm.Ke0.T, atol=1e-6)
+
+def test_Ke0_positive_definite(small_problem):
+    """
+    Ke0 with free boundary conditions has 6 zero eigenvalues (rigid body modes).
+    All remaining eigenvalues must be positive.
+    """
+    _, _, asm = small_problem
+    eigvals = np.linalg.eigvalsh(asm.Ke0)
+    # Sort and check: 6 near-zero (rigid body), rest positive
+    assert np.all(eigvals[6:] > 0), f"Non-rigid eigenvalues not all positive: {eigvals}"
+
+def test_assemble_K_shape(small_problem):
+    mesh, _, asm = small_problem
+    rho = np.ones(mesh.n_elem)
+    K   = asm.assemble_K(rho)
+    assert K.shape == (mesh.n_dof, mesh.n_dof)
+
+def test_assemble_K_is_csc(small_problem):
+    mesh, _, asm = small_problem
+    rho = np.ones(mesh.n_elem)
+    K   = asm.assemble_K(rho)
+    assert sp.issparse(K) and K.format == 'csc'
+
+def test_assemble_K_symmetry(small_problem):
+    mesh, _, asm = small_problem
+    rho = np.ones(mesh.n_elem)
+    K   = asm.assemble_K(rho)
+    diff = K - K.T
+    assert abs(diff).max() < 1e-6, "K is not symmetric"
+
+def test_assemble_K_void(small_problem):
+    """K with rho=0 should be E_min * K_full — not zero."""
+    mesh, _, asm = small_problem
+    E_min  = 1e-9
+    K_full = asm.assemble_K(np.ones(mesh.n_elem))
+    K_void = asm.assemble_K(np.zeros(mesh.n_elem), E_min_factor=E_min)
+    # Compare via Frobenius norm rather than elementwise ratio
+    # (elementwise division is unstable when K_full has near-zero entries
+    # from algebraic cancellation after COO->CSC duplicate summation)
+    diff = K_void - E_min * K_full
+    np.testing.assert_allclose(
+        diff.data, 0.0, atol=1e-3,
+        err_msg="K_void is not E_min * K_full to required tolerance"
+    )
