@@ -551,9 +551,11 @@ class SIMPSolver:
 
         # Bracket for lambda_1
         lam_lo = 0.0
-        lam_hi = cfg.bisect_safety * np.max(p0e) / (
-            Vf * np.min(p1e + 1e-30)
-        )
+        # Bracket upper bound based on q0e (objective negative-gradient term).
+        # p0e = 0 for compliance (all dc_drho negative) so cannot use it here.
+        # Need lam1 large enough that sqrt(lam1*p1e) >> sqrt(q0e),
+        # driving rho_star toward L (lower asymptote) → mean(rho) < Vf.
+        lam_hi = cfg.bisect_safety * np.max(q0e + p0e + 1e-30) / np.min(p1e + 1e-30)
 
         bisect_iters = 0
         lam1 = 0.5 * (lam_lo + lam_hi)
