@@ -179,17 +179,18 @@ def test_explicit_oc_overrides_auto(small_problem):
 
 # ── MMA convergence test (Decision 8) ────────────────────────────────────
 
-def test_mma_converges(small_problem):
-    """MMA must converge and enforce volume fraction."""
+def test_mma_converges():
+    """MMA must converge and enforce volume fraction.
+    Uses 10^3 mesh (not shared fixture) to keep test time < 10s."""
+    prob   = build_problem(material="Ti64", nx=10, ny=10, nz=10)
     cfg    = SIMPConfig(update_scheme="MMA", max_iter=20, tol=1e-2)
-    result = run_simp(small_problem, config=cfg)
+    result = run_simp(prob, config=cfg)
     assert result.scheme_used == "MMA"
     assert result.compliance > 0
     np.testing.assert_allclose(
         result.rho.mean(), cfg.volume_fraction,
         atol=cfg.bisect_tol * 10
     )
-
 
 # ── Volume constraint test (Decision 9) ──────────────────────────────────
 
@@ -203,7 +204,6 @@ def test_volume_fraction_parametric(small_problem, Vf):
         atol=cfg.bisect_tol * 10,
         err_msg=f"Volume fraction {Vf} not enforced"
     )
-
 
 # ── Design params stored (Decision 10) ───────────────────────────────────
 
@@ -229,7 +229,6 @@ def test_design_params_overrides_vf(small_problem):
         atol=cfg.bisect_tol * 10,
         err_msg="design_params volume_fraction did not override config"
     )
-
 
 # ── All three materials (Decision 10) ────────────────────────────────────
 
