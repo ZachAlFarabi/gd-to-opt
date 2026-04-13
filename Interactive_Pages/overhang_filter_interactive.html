@@ -1,0 +1,150 @@
+
+<style>
+.wrap2 { padding: 1rem 0; font-family: var(--font-sans); }
+.oh-grid { display: flex; flex-direction: column; gap: 3px; align-items: center; margin: 8px 0 12px; }
+.oh-row { display: flex; gap: 3px; align-items: center; }
+.oh-cell { width: 52px; height: 44px; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; font-size: 11px; font-weight: 500; border: 1px solid var(--color-border-tertiary); position: relative; cursor: pointer; transition: all .15s; }
+.oh-cell .ov-badge { font-size: 10px; position: absolute; bottom: 2px; right: 3px; opacity: .7; }
+.build-arrow { display: flex; flex-direction: column; align-items: center; margin-left: 12px; font-size: 11px; color: var(--color-text-tertiary); }
+.oh-controls { display: flex; gap: 16px; align-items: center; font-size: 13px; color: var(--color-text-secondary); margin: 10px 0; flex-wrap: wrap; }
+.oh-legend { display: flex; gap: 12px; font-size: 11px; color: var(--color-text-secondary); margin-bottom: 10px; flex-wrap: wrap; }
+.oh-legend span { display: flex; align-items: center; gap: 4px; }
+.oh-sq { width: 10px; height: 10px; border-radius: 2px; }
+.oh-hint { font-size: 12px; color: var(--color-text-tertiary); margin-top: 8px; }
+.oh-eq { background: var(--color-background-secondary); border-left: 3px solid #1D9E75; border-radius: 0 6px 6px 0; padding: 8px 12px; font-family: var(--font-mono); font-size: 11px; color: var(--color-text-primary); margin: 10px 0; line-height: 1.8; }
+.row-label { font-size: 10px; color: var(--color-text-tertiary); width: 32px; text-align: right; margin-right: 2px; }
+</style>
+
+<div class="wrap2">
+
+<div class="oh-legend">
+  <span><span class="oh-sq" style="background:#9FE1CB;border:1px solid #1D9E75"></span> supported (has material below)</span>
+  <span><span class="oh-sq" style="background:#F5C4B3;border:1px solid #D85A30"></span> overhang (o_e &gt; 0)</span>
+  <span><span class="oh-sq" style="background:var(--color-background-secondary);border:1px solid var(--color-border-tertiary)"></span> void</span>
+</div>
+
+<div style="display:flex;align-items:flex-start;gap:16px">
+<div>
+<div class="oh-grid" id="oh-grid"></div>
+</div>
+<div class="build-arrow">
+  <div style="width:2px;height:80px;background:var(--color-border-secondary);margin:0 auto"></div>
+  <div style="font-size:18px;color:var(--color-text-secondary);margin:-4px 0">↑</div>
+  <div style="writing-mode:horizontal-tb;margin-top:4px">Z build</div>
+</div>
+<div style="flex:1;min-width:180px">
+  <div class="oh-eq" id="oh-eq">Click a cell to see its overhang calculation</div>
+</div>
+</div>
+
+<div class="oh-controls">
+  <span>P-norm exponent</span>
+  <input type="range" min="1" max="3" step="0.5" value="2" id="p-slider" style="width:100px" oninput="ohUpdate()">
+  <span id="p-label" style="font-weight:500;color:var(--color-text-primary)">P=2</span>
+  <span style="color:var(--color-text-tertiary);font-size:11px">(P=1: kinked, P=2: smooth, P=3: sharper)</span>
+</div>
+
+<div class="oh-hint">Click any solid element to inspect its overhang measure o_e. Red = unsupported, green = supported. Drag P to see smoothness change.</div>
+</div>
+
+<script>
+const NR = 6, NC = 6;
+const ohRho = [
+  [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+  [0.0, 0.0, 0.9, 0.9, 0.0, 0.0],
+  [0.0, 0.9, 0.9, 0.9, 0.9, 0.0],
+  [0.9, 0.9, 0.0, 0.0, 0.9, 0.9],
+  [0.9, 0.9, 0.0, 0.0, 0.9, 0.9],
+  [0.9, 0.9, 0.9, 0.9, 0.9, 0.9],
+];
+const rowLabels = ['z=5','z=4','z=3','z=2','z=1','z=0'];
+let ohSel = null;
+
+function ohOverhang(r, c, P) {
+  if (ohRho[r][c] < 0.1) return 0;
+  const rhoBelow = r < NR-1 ? ohRho[r+1][c] : 0;
+  const diff = ohRho[r][c] - rhoBelow;
+  if (diff <= 0) return 0;
+  return Math.pow(diff, P);
+}
+
+function ohUpdate() {
+  const P = parseFloat(document.getElementById('p-slider').value);
+  document.getElementById('p-label').textContent = 'P=' + P.toFixed(1);
+
+  const grid = document.getElementById('oh-grid');
+  grid.innerHTML = '';
+
+  for (let r = 0; r < NR; r++) {
+    const rowDiv = document.createElement('div');
+    rowDiv.className = 'oh-row';
+
+    const lbl = document.createElement('div');
+    lbl.className = 'row-label';
+    lbl.textContent = rowLabels[r];
+    rowDiv.appendChild(lbl);
+
+    for (let c = 0; c < NC; c++) {
+      const cell = document.createElement('div');
+      cell.className = 'oh-cell';
+      const v = ohRho[r][c];
+      const ov = ohOverhang(r, c, P);
+
+      if (v < 0.1) {
+        cell.style.background = 'var(--color-background-secondary)';
+        cell.style.color = 'var(--color-text-tertiary)';
+        cell.textContent = '0.0';
+      } else if (ov > 0.001) {
+        const intensity = Math.min(1, ov * 2);
+        cell.style.background = `rgba(240,153,123,${0.3 + intensity * 0.7})`;
+        cell.style.borderColor = '#D85A30';
+        cell.style.color = '#712B13';
+        cell.textContent = v.toFixed(1);
+        const badge = document.createElement('span');
+        badge.className = 'ov-badge';
+        badge.textContent = 'o=' + ov.toFixed(2);
+        cell.appendChild(badge);
+      } else {
+        cell.style.background = '#9FE1CB';
+        cell.style.borderColor = '#1D9E75';
+        cell.style.color = '#085041';
+        cell.textContent = v.toFixed(1);
+        const badge = document.createElement('span');
+        badge.className = 'ov-badge';
+        badge.textContent = 'o=0';
+        cell.appendChild(badge);
+      }
+
+      if (ohSel && ohSel[0] === r && ohSel[1] === c) {
+        cell.style.outline = '2px solid #534AB7';
+        cell.style.outlineOffset = '1px';
+      }
+
+      cell.onclick = () => {
+        ohSel = [r, c];
+        ohUpdate();
+        const rhoBelow = r < NR-1 ? ohRho[r+1][c] : 0;
+        const diff = v - rhoBelow;
+        const ov2 = ohOverhang(r, c, P);
+        const eq = document.getElementById('oh-eq');
+        if (v < 0.1) {
+          eq.textContent = 'void element — o_e = 0 by definition';
+        } else {
+          eq.innerHTML =
+            `ρ_e        = ${v.toFixed(2)}  (this element)\n` +
+            `ρ_below    = ${rhoBelow.toFixed(2)}  (element directly below)\n` +
+            `diff       = ${diff.toFixed(2)}\n` +
+            `o_e = max(0, diff)^P\n` +
+            `    = max(0, ${diff.toFixed(2)})^${P.toFixed(1)}\n` +
+            `    = ${ov2.toFixed(4)}` +
+            (ov2 > 0.001 ? '  ← needs support' : '  ← supported');
+        }
+      };
+      rowDiv.appendChild(cell);
+    }
+    grid.appendChild(rowDiv);
+  }
+}
+
+ohUpdate();
+</script>
