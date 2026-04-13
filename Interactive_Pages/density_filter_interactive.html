@@ -1,0 +1,154 @@
+
+<style>
+.wrap { padding: 1rem 0; font-family: var(--font-sans); }
+.grid-row { display: flex; gap: 4px; justify-content: center; margin-bottom: 4px; }
+.cell { width: 48px; height: 48px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 500; cursor: pointer; border: 1.5px solid transparent; transition: all .15s; position: relative; user-select: none; }
+.cell.selected { border-color: #1D9E75 !important; }
+.cell.neighbour { border-color: #EF9F27 !important; }
+.controls { display: flex; gap: 16px; align-items: center; margin: 16px 0 12px; flex-wrap: wrap; font-size: 13px; color: var(--color-text-secondary); }
+.result-row { display: flex; gap: 24px; margin-top: 14px; flex-wrap: wrap; }
+.result-card { background: var(--color-background-secondary); border-radius: 8px; padding: 10px 16px; flex: 1; min-width: 140px; }
+.result-label { font-size: 11px; color: var(--color-text-tertiary); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.result-val { font-size: 20px; font-weight: 500; color: var(--color-text-primary); }
+.legend { display: flex; gap: 16px; font-size: 11px; color: var(--color-text-secondary); margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+.legend-sq { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.hint { font-size: 12px; color: var(--color-text-tertiary); margin-top: 10px; }
+</style>
+
+<div class="wrap">
+<div class="legend">
+  <span><span class="legend-sq" style="background:#1D9E75;border:1.5px solid #0F6E56"></span> selected element</span>
+  <span><span class="legend-sq" style="background:#FAEEDA;border:1.5px solid #EF9F27"></span> neighbourhood (within radius)</span>
+  <span><span class="legend-sq" style="background:var(--color-background-secondary);border:1px solid var(--color-border-tertiary)"></span> outside radius</span>
+</div>
+
+<div id="grid-raw"></div>
+
+<div class="controls">
+  <span>Filter radius</span>
+  <input type="range" min="1" max="3" step="0.5" value="1.5" id="radius-slider" style="width:120px" oninput="update()">
+  <span id="radius-label" style="min-width:28px;font-weight:500;color:var(--color-text-primary)">1.5</span>
+  <span style="margin-left:8px">element lengths</span>
+</div>
+
+<div class="result-row">
+  <div class="result-card">
+    <div class="result-label">Raw ρ at selected</div>
+    <div class="result-val" id="raw-val">—</div>
+  </div>
+  <div class="result-card">
+    <div class="result-label">Filtered ρ at selected</div>
+    <div class="result-val" id="filt-val">—</div>
+  </div>
+  <div class="result-card">
+    <div class="result-label">Neighbours used</div>
+    <div class="result-val" id="neigh-count">—</div>
+  </div>
+  <div class="result-card">
+    <div class="result-label">Weight decay type</div>
+    <div class="result-val" style="font-size:14px">linear hat</div>
+  </div>
+</div>
+
+<div class="hint">Click any element to select it and see its neighbourhood. The filtered density is the weighted average of neighbours — darker = denser.</div>
+</div>
+
+<script>
+const N = 7;
+const rho = [
+  [0.05,0.95,0.05,0.95,0.05,0.95,0.05],
+  [0.95,0.05,0.95,0.05,0.95,0.05,0.95],
+  [0.05,0.95,0.05,0.95,0.05,0.95,0.05],
+  [0.95,0.05,0.95,0.05,0.95,0.05,0.95],
+  [0.05,0.95,0.05,0.95,0.05,0.95,0.05],
+  [0.95,0.05,0.95,0.05,0.95,0.05,0.95],
+  [0.05,0.95,0.05,0.95,0.05,0.95,0.05],
+];
+
+let sel = [3, 3];
+
+function rhoColor(v) {
+  const light = getComputedStyle(document.documentElement).getPropertyValue('--color-background-primary').trim() || '#fff';
+  const r = Math.round(220 - v * 180);
+  const g = Math.round(220 - v * 180);
+  const b = Math.round(220 - v * 180);
+  return `rgb(${r},${g},${b})`;
+}
+
+function textColor(v) {
+  return v > 0.5 ? '#fff' : 'var(--color-text-primary)';
+}
+
+function dist(r1, c1, r2, c2) {
+  return Math.sqrt((r1-r2)**2 + (c1-c2)**2);
+}
+
+function getNeighbours(row, col, radius) {
+  const nb = [];
+  for (let r = 0; r < N; r++) {
+    for (let c = 0; c < N; c++) {
+      const d = dist(row, col, r, c);
+      if (d <= radius) nb.push({r, c, d, w: Math.max(0, radius - d)});
+    }
+  }
+  return nb;
+}
+
+function filteredRho(row, col, radius) {
+  const nb = getNeighbours(row, col, radius);
+  let num = 0, den = 0;
+  for (const {r, c, w} of nb) {
+    num += w * rho[r][c];
+    den += w;
+  }
+  return den > 0 ? num / den : rho[row][col];
+}
+
+function update() {
+  const radius = parseFloat(document.getElementById('radius-slider').value);
+  document.getElementById('radius-label').textContent = radius.toFixed(1);
+  const nb = getNeighbours(sel[0], sel[1], radius);
+  const nbSet = new Set(nb.map(({r,c}) => `${r},${c}`));
+
+  const grid = document.getElementById('grid-raw');
+  grid.innerHTML = '';
+
+  for (let r = 0; r < N; r++) {
+    const row = document.createElement('div');
+    row.className = 'grid-row';
+    for (let c = 0; c < N; c++) {
+      const cell = document.createElement('div');
+      cell.className = 'cell';
+      const v = rho[r][c];
+      cell.style.background = rhoColor(v);
+      cell.style.color = textColor(v);
+      cell.textContent = v.toFixed(2);
+
+      const isSel = r === sel[0] && c === sel[1];
+      const isNb = nbSet.has(`${r},${c}`) && !isSel;
+
+      if (isSel) {
+        cell.classList.add('selected');
+        cell.style.background = '#1D9E75';
+        cell.style.color = '#fff';
+      } else if (isNb) {
+        cell.classList.add('neighbour');
+        const nbInfo = nb.find(n => n.r === r && n.c === c);
+        const wNorm = nbInfo ? (nbInfo.w / radius) : 0;
+        cell.style.opacity = 0.5 + 0.5 * wNorm;
+      }
+
+      cell.onclick = () => { sel = [r, c]; update(); };
+      row.appendChild(cell);
+    }
+    grid.appendChild(row);
+  }
+
+  const fv = filteredRho(sel[0], sel[1], radius);
+  document.getElementById('raw-val').textContent = rho[sel[0]][sel[1]].toFixed(2);
+  document.getElementById('filt-val').textContent = fv.toFixed(3);
+  document.getElementById('neigh-count').textContent = nb.length;
+}
+
+update();
+</script>
