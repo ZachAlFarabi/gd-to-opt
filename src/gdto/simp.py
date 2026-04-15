@@ -295,10 +295,10 @@ class SIMPSolver:
                     rho, dc_drho_filtered, Vf
                 )
             else:  # MMA
+                # extra_grads (overhang constraint) wired into dual
+                # bisection in chunk 3 — currently volume only
                 rho, mu, bisect_iters = self._mma_update(
-                    rho, dc_drho_filtered, Vf, iteration,
-                    extra_grads=[dV_drho] if float(design_params.get(
-                        "overhang_weight", 0.0)) > 0 else []
+                    rho, dc_drho_filtered, Vf, iteration
                 )
 
             # 9. Compute change
