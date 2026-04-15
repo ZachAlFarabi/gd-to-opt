@@ -26,6 +26,7 @@ from typing import NamedTuple
 from dataclasses import dataclass, field
 
 from gdto.mesh_material import ProblemData
+from gdto.filters import DensityFilter, OverhangFilter
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,10 @@ class SIMPConfig:
     # Overhang proxy parameters
     overhang_threshold: float = 0.5  # density threshold for support proxy
 
+    filter_radius: float = 1.5    # density filter radius in element lengths
+    overhang_P:    float = 2.0    # overhang P-norm exponent
+    build_axis:    int   = 2      # build direction: 0=X, 1=Y, 2=Z
+
     @classmethod
     def from_dict(cls, d: dict) -> "SIMPConfig":
         """Construct from a config dict (e.g. yaml['simp'])."""
@@ -132,6 +137,9 @@ class SIMPConfig:
             bisect_tol      = float(d.get("bisect_tol",      cls.bisect_tol)),
             bisect_max_iter = int(d.get("bisect_max_iter",   cls.bisect_max_iter)),
             bisect_safety   = float(d.get("bisect_safety",   cls.bisect_safety)),
+            filter_radius   = float(d.get("filter_radius",   cls.filter_radius)),
+            overhang_P      = float(d.get("overhang_P",      cls.overhang_P)),
+            build_axis      = int(d.get("build_axis",         cls.build_axis)),
         )
 
 
@@ -184,7 +192,18 @@ class SIMPSolver:
     def __init__(self, problem: ProblemData, config: SIMPConfig) -> None:
         self.problem = problem
         self.config  = config
-        self._mma_state: MMAState | None = None
+        self._mma_state: MMAState | None = None  # ← existing line
+
+        # Construct filters (Decision 11-13)
+        self._density_filter  = DensityFilter(
+            problem.mesh,
+            radius=getattr(config, 'filter_radius', 1.5)
+        )
+        self._overhang_filter = OverhangFilter(
+            problem.mesh,
+            P          = getattr(config, 'overhang_P', 2.0),
+            build_axis = getattr(config, 'build_axis', 2),
+        )
 
     def solve(self, design_params: dict | None = None) -> SIMPResult:
         """
@@ -233,38 +252,42 @@ class SIMPSolver:
         # ── SIMP iteration loop ────────────────────────────────────────────
         for iteration in range(cfg.max_iter):
 
-            # 1. Assemble K and apply BCs
-            K      = asm.assemble_K(rho, p=cfg.p, E_min_factor=cfg.E_min_factor)
+            # 1. Filter density field (Decision 11 forward pass)
+            rho_filtered = self._density_filter.apply(rho)
+
+            # 2. Assemble K and apply BCs using filtered density
+            K         = asm.assemble_K(rho_filtered, p=cfg.p,
+                                       E_min_factor=cfg.E_min_factor)
             K_ff, f_f = bc.apply(K)
 
-            # 2. Solve reduced system
+            # 3. Solve reduced system
             u_free = self._solve_linear(K_ff, f_f)
             u_full = bc.expand(u_free)
 
-            # 3. Compliance (Decision 10: reuse strain energies)
-            Ue           = u_full[mesh.dof_map]          # (n_elem, 24)
-            Ke0_Ue       = Ue @ asm.Ke0.T                # (n_elem, 24)
-            strain_energy = np.einsum('ei,ei->e', Ue, Ke0_Ue)  # (n_elem,)
-            compliance   = float(np.dot(
-                cfg.E_min_factor + rho**cfg.p * (1.0 - cfg.E_min_factor),
+            # 4. Compliance (Decision 10: reuse strain energies)
+            Ue            = u_full[mesh.dof_map]
+            Ke0_Ue        = Ue @ asm.Ke0.T
+            strain_energy = np.einsum('ei,ei->e', Ue, Ke0_Ue)
+            compliance    = float(np.dot(
+                cfg.E_min_factor + rho_filtered**cfg.p * (1.0 - cfg.E_min_factor),
                 strain_energy
             ))
 
-            # 4. Sensitivity (Decision 7: fully vectorised)
-            # dC/drho_e = -p * rho_e^(p-1) * (1-E_min) * u_e^T Ke0 u_e
-            dc_drho = (
+            # 5. Sensitivity w.r.t filtered density (Decision 7)
+            dc_d_rho_filtered = (
                 -cfg.p
-                * rho ** (cfg.p - 1.0)
+                * rho_filtered ** (cfg.p - 1.0)
                 * (1.0 - cfg.E_min_factor)
                 * strain_energy
             )
 
-            # 5. Sensitivity filter stub
-            # Full implementation in chunk 3 (filters.py).
-            # For now: no filter (equivalent to filter radius = 0).
-            dc_drho_filtered = dc_drho.copy()
+            # 6. Chain rule backprop through density filter (Decision 11)
+            dc_drho_filtered = self._density_filter.backprop(dc_d_rho_filtered)
 
-            # 6. Density update
+            # 7. Overhang constraint gradient (Decision 13)
+            V_supp, dV_drho = self._overhang_filter.compute(rho_filtered)
+
+            # 8. Density update
             rho_old = rho.copy()
 
             if scheme == "OC":
@@ -273,17 +296,21 @@ class SIMPSolver:
                 )
             else:  # MMA
                 rho, mu, bisect_iters = self._mma_update(
-                    rho, dc_drho_filtered, Vf, iteration
+                    rho, dc_drho_filtered, Vf, iteration,
+                    extra_grads=[dV_drho] if float(design_params.get(
+                        "overhang_weight", 0.0)) > 0 else []
                 )
 
-            # 7. Log diagnostics
+            # 9. Compute change
             change = float(np.max(np.abs(rho - rho_old)))
+
+            # 10. Log diagnostics
             compliance_history.append(compliance)
             change_history.append(change)
             mu_history.append(mu)
             bisect_iters_list.append(bisect_iters)
 
-            # 8. Convergence check
+            # 11. Convergence check
             if change < cfg.tol:
                 converged = True
                 break
@@ -579,6 +606,8 @@ class SIMPSolver:
     def _compute_support_volume(
         self, rho: np.ndarray, v_elem: float
     ) -> float:
+        V_supp, _ = self._overhang_filter.compute(rho)
+        return V_supp
         """
         Smooth overhang support volume proxy (Gaynor & Guest 2016).
 
