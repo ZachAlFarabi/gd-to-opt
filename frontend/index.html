@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GD-TO Topology Optimiser</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+         background: #0f0f13; color: #e0e0e8; height: 100vh; display: flex;
+         flex-direction: column; overflow: hidden; }
+
+  header { padding: 12px 20px; background: #1a1a24; border-bottom: 1px solid #2a2a38;
+           display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 16px; font-weight: 600; color: #a0c4ff; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #444; }
+  .status-dot.ok { background: #4ade80; }
+  #status-text { font-size: 12px; color: #888; }
+
+  .main { display: grid; grid-template-columns: 320px 1fr 1fr; gap: 0; flex: 1;
+          overflow: hidden; }
+
+  .panel { display: flex; flex-direction: column; border-right: 1px solid #2a2a38;
+           overflow-y: auto; }
+  .panel:last-child { border-right: none; }
+
+  .panel-header { padding: 12px 16px; background: #1a1a24; border-bottom: 1px solid #2a2a38;
+                  font-size: 12px; font-weight: 600; color: #888; text-transform: uppercase;
+                  letter-spacing: .06em; }
+
+  .section { padding: 14px 16px; border-bottom: 1px solid #1e1e2a; }
+  label { font-size: 12px; color: #888; display: block; margin-bottom: 4px; }
+
+  input[type=number], select {
+    width: 100%; padding: 6px 10px; background: #1e1e2a; border: 1px solid #2a2a38;
+    border-radius: 6px; color: #e0e0e8; font-size: 13px; outline: none;
+  }
+  input[type=range] { width: 100%; accent-color: #a0c4ff; cursor: pointer; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+
+  .face-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; margin-top: 6px; }
+  .face-btn { padding: 5px 4px; font-size: 11px; background: #1e1e2a;
+              border: 1px solid #2a2a38; border-radius: 5px; color: #888;
+              cursor: pointer; text-align: center; transition: all .15s; }
+  .face-btn:hover { border-color: #a0c4ff; color: #a0c4ff; }
+  .face-btn.fixed { background: #1a2a4a; border-color: #4080c0; color: #80b4ff; }
+  .face-btn.loaded { background: #2a1a1a; border-color: #c04040; color: #ff8080; }
+  .face-btn.flux   { background: #2a1a2a; border-color: #a040c0; color: #d080ff; }
+
+  .btn { width: 100%; padding: 10px; border-radius: 8px; border: none;
+         font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s; }
+  .btn-primary { background: #2563eb; color: white; }
+  .btn-primary:hover { background: #1d4ed8; }
+  .btn-primary:disabled { background: #2a2a38; color: #555; cursor: default; }
+  .btn-sm { padding: 5px 10px; font-size: 11px; border-radius: 5px; border: 1px solid #2a2a38;
+            background: #1e1e2a; color: #888; cursor: pointer; }
+  .btn-sm:hover { border-color: #a0c4ff; color: #a0c4ff; }
+
+  .viewer { background: #0a0a10; position: relative; flex: 1; }
+  canvas { display: block; }
+
+  .info-bar { position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,.7);
+              padding: 6px 10px; border-radius: 6px; font-size: 11px; color: #aaa;
+              pointer-events: none; }
+
+  .drop-overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+                  align-items: center; justify-content: center; background: rgba(10,10,16,.9);
+                  border: 2px dashed #2a2a38; border-radius: 8px; gap: 8px;
+                  cursor: pointer; transition: border-color .2s; }
+  .drop-overlay:hover, .drop-overlay.drag { border-color: #a0c4ff; }
+  .drop-overlay .icon { font-size: 36px; opacity: .5; }
+  .drop-overlay p { font-size: 13px; color: #666; }
+
+  .report-card { margin: 12px 16px; background: #1a1a24; border-radius: 8px;
+                 border: 1px solid #2a2a38; padding: 14px; }
+  .report-row { display: flex; justify-content: space-between; align-items: center;
+                padding: 4px 0; font-size: 12px; border-bottom: 1px solid #1e1e2a; }
+  .report-row:last-child { border-bottom: none; }
+  .report-label { color: #666; }
+  .report-value { font-weight: 500; color: #e0e0e8; }
+  .sf-green { color: #4ade80; }
+  .sf-amber { color: #fbbf24; }
+  .sf-red   { color: #f87171; }
+
+  #progress-section { padding: 12px 16px; }
+  #log { font-size: 11px; color: #555; max-height: 80px; overflow-y: auto; }
+  #log p { padding: 1px 0; }
+
+  .tab-row { display: flex; gap: 2px; padding: 8px 12px 0; }
+  .tab { padding: 5px 12px; font-size: 11px; border-radius: 5px 5px 0 0;
+         border: 1px solid #2a2a38; border-bottom: none; cursor: pointer;
+         background: #1a1a24; color: #666; }
+  .tab.active { background: #0f0f13; color: #a0c4ff; border-bottom: 1px solid #0f0f13; }
+
+  .compliance-chart-wrap { padding: 12px 16px; }
+
+  .view-toggle { display:flex; gap:4px; }
+  .view-btn { padding:4px 10px; font-size:11px; border-radius:5px;
+              border:1px solid #2a2a38; background:#1a1a24; color:#666; cursor:pointer; }
+  .view-btn.active { background:#1e3a5f; border-color:#4080c0; color:#80b4ff; }
+  .iter-bar { padding:8px 12px; background:#1a1a24; border-bottom:1px solid #2a2a38;
+              display:none; gap:10px; align-items:center; font-size:11px; color:#888; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>GD-TO Topology Optimiser</h1>
+  <div class="status-dot" id="dot"></div>
+  <span id="status-text">connecting...</span>
+</header>
+
+<div class="main">
+
+  <!-- ── LEFT PANEL: settings ─────────────────────────────────────── -->
+  <div class="panel" id="left-panel">
+    <div class="panel-header">Configuration</div>
+
+    <div class="section">
+      <label>Material</label>
+      <select id="material">
+        <option value="Ti64">Ti-6Al-4V</option>
+        <option value="AlSi10Mg">AlSi10Mg</option>
+        <option value="316L">316L Stainless</option>
+      </select>
+    </div>
+
+    <div class="section">
+      <label>Mesh resolution</label>
+      <div class="grid-3">
+        <div><label>nx</label><input type="number" id="nx" value="20" min="4" max="60"></div>
+        <div><label>ny</label><input type="number" id="ny" value="20" min="4" max="60"></div>
+        <div><label>nz</label><input type="number" id="nz" value="20" min="4" max="60"></div>
+      </div>
+      <div id="voxel-display" style="margin-top:8px;font-size:11px;color:#666">
+        Load an STL to see voxel dimensions
+      </div>
+    </div>
+
+    <div class="section">
+      <label>Volume fraction: <span id="vf-label">0.40</span></label>
+      <input type="range" id="vf" min="0.1" max="0.9" step="0.05" value="0.4"
+             oninput="document.getElementById('vf-label').textContent=parseFloat(this.value).toFixed(2)">
+    </div>
+
+    <div class="section">
+      <label>SIMP iterations: <span id="iter-label">40</span></label>
+      <input type="range" id="max-iter" min="5" max="150" step="5" value="40"
+             oninput="document.getElementById('iter-label').textContent=this.value">
+    </div>
+
+    <div class="section">
+      <label>Filter radius: <span id="fr-label">1.5</span> elem</label>
+      <input type="range" id="filter-radius" min="0.5" max="3.0" step="0.5" value="1.5"
+             oninput="document.getElementById('fr-label').textContent=parseFloat(this.value).toFixed(1)">
+    </div>
+
+    <!-- Boundary conditions -->
+    <div class="section">
+      <div class="tab-row" style="padding:0 0 8px">
+        <div class="tab active" onclick="switchLoadTab('structural',this)">Structural</div>
+        <div class="tab" onclick="switchLoadTab('thermal',this)">Thermal</div>
+      </div>
+
+      <div id="tab-structural">
+        <label>Fixed faces (click to toggle)</label>
+        <div class="face-grid" id="fixed-face-grid">
+          <div class="face-btn fixed" data-face="zmin" onclick="toggleFixed(this)">zmin</div>
+          <div class="face-btn" data-face="zmax" onclick="toggleFixed(this)">zmax</div>
+          <div class="face-btn" data-face="xmin" onclick="toggleFixed(this)">xmin</div>
+          <div class="face-btn" data-face="xmax" onclick="toggleFixed(this)">xmax</div>
+          <div class="face-btn" data-face="ymin" onclick="toggleFixed(this)">ymin</div>
+          <div class="face-btn" data-face="ymax" onclick="toggleFixed(this)">ymax</div>
+        </div>
+        <div style="margin-top:10px">
+          <label>Load face</label>
+          <select id="load-face">
+            <option value="zmax">zmax</option>
+            <option value="zmin">zmin</option>
+            <option value="xmin">xmin</option>
+            <option value="xmax">xmax</option>
+            <option value="ymin">ymin</option>
+            <option value="ymax">ymax</option>
+          </select>
+        </div>
+        <div class="grid-2" style="margin-top:8px">
+          <div><label>Magnitude (N)</label>
+               <input type="number" id="load-mag" value="-1000"></div>
+          <div><label>Direction</label>
+               <select id="load-dir">
+                 <option value="2">Z</option>
+                 <option value="0">X</option>
+                 <option value="1">Y</option>
+               </select></div>
+        </div>
+      </div>
+
+      <div id="tab-thermal" style="display:none">
+        <label>Heat flux faces (W/m²)</label>
+        <div id="flux-list">
+          <div class="grid-2" style="margin-bottom:6px">
+            <select class="flux-face-sel">
+              <option value="">-- none --</option>
+              <option value="zmin">zmin</option><option value="zmax">zmax</option>
+              <option value="xmin">xmin</option><option value="xmax">xmax</option>
+              <option value="ymin">ymin</option><option value="ymax">ymax</option>
+            </select>
+            <input type="number" class="flux-val" placeholder="W/m²" value="5000">
+          </div>
+        </div>
+        <label style="margin-top:10px">Fixed temperature faces (°C)</label>
+        <div id="temp-list">
+          <div class="grid-2">
+            <select class="temp-face-sel">
+              <option value="">-- none --</option>
+              <option value="zmin">zmin</option><option value="zmax">zmax</option>
+              <option value="xmin">xmin</option><option value="xmax">xmax</option>
+              <option value="ymin">ymin</option><option value="ymax">ymax</option>
+            </select>
+            <input type="number" class="temp-val" placeholder="°C" value="20">
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <button class="btn btn-primary" id="run-btn" onclick="runOptimise()" disabled>
+        Run optimisation
+      </button>
+    </div>
+
+    <div id="progress-section">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <label style="margin:0">Progress</label>
+        <span id="iter-counter" style="font-size:11px;color:#555">—</span>
+      </div>
+      <div style="background:#1e1e2a;border-radius:4px;height:6px;margin-bottom:8px;overflow:hidden">
+        <div id="progress-bar" style="height:100%;width:0%;background:#2563eb;border-radius:4px;transition:width .3s"></div>
+      </div>
+      <div id="log"><p>Load an STL to begin</p></div>
+    </div>
+
+    <div class="compliance-chart-wrap">
+      <label>Compliance history</label>
+      <canvas id="chart" height="120"></canvas>
+    </div>
+  </div>
+
+  <!-- ── CENTRE PANEL: input STL viewer ───────────────────────────── -->
+  <div class="panel">
+    <div class="panel-header">Input geometry</div>
+    <div class="viewer" id="viewer-in">
+      <div class="drop-overlay" id="drop-zone"
+           ondragover="event.preventDefault();this.classList.add('drag')"
+           ondragleave="this.classList.remove('drag')"
+           ondrop="handleDrop(event)"
+           onclick="document.getElementById('file-input').click()">
+        <div class="icon">&#9723;</div>
+        <p>Drop STL here or click to browse</p>
+        <p style="font-size:11px;color:#444">assumed millimetres</p>
+      </div>
+      <div class="info-bar" id="info-in" style="display:none"></div>
+    </div>
+    <input type="file" id="file-input" accept=".stl" style="display:none"
+           onchange="handleFile(this.files[0])">
+  </div>
+
+  <!-- ── RIGHT PANEL: result viewer + report ──────────────────────── -->
+  <div class="panel">
+    <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
+      <span>Optimised result</span>
+      <div class="view-toggle">
+        <button class="view-btn active" id="btn-stl"    onclick="setViewMode('stl')">STL</button>
+        <button class="view-btn"        id="btn-voxels" onclick="setViewMode('voxels')">Density</button>
+      </div>
+    </div>
+    <div class="iter-bar" id="iter-bar">
+      <span>Iteration</span>
+      <input type="range" id="iter-slider" min="0" max="0" value="0"
+             style="flex:1" oninput="scrubToIter(parseInt(this.value))">
+      <span id="iter-slider-label" style="min-width:52px;text-align:right;color:#a0c4ff">—</span>
+    </div>
+    <div class="viewer" id="viewer-out">
+      <div style="display:flex;align-items:center;justify-content:center;height:100%;
+                  color:#333;font-size:13px">Awaiting optimisation</div>
+      <div class="info-bar" id="info-out" style="display:none"></div>
+    </div>
+    <div id="report-container"></div>
+  </div>
+
+</div>
+
+<!-- Three.js + STLLoader + Chart.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/STLLoader.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+<script>
+const API = 'http://localhost:8000';
+let inputSTLb64 = null;
+let complianceChart = null;
+let sceneIn = null, sceneOut = null;
+let snapshots = [], snapIters = [], domainInfo = null;
+let voxelInstMesh = null, viewMode = 'stl';
+let faceOverlays = [];
+
+// ── Server health check ──────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    const r = await fetch(`${API}/health`);
+    if (r.ok) {
+      document.getElementById('dot').className = 'status-dot ok';
+      document.getElementById('status-text').textContent = 'server ready';
+    }
+  } catch {
+    document.getElementById('status-text').textContent = 'server offline — run: uvicorn gdto.server:app --port 8000';
+    setTimeout(checkHealth, 3000);
+  }
+}
+checkHealth();
+
+// ── Tab switching ────────────────────────────────────────────────────────
+function switchLoadTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-structural').style.display = name==='structural' ? '' : 'none';
+  document.getElementById('tab-thermal').style.display    = name==='thermal'    ? '' : 'none';
+}
+
+// ── Face BC toggles ──────────────────────────────────────────────────────
+function toggleFixed(btn) {
+  btn.classList.toggle('fixed');
+  updateFaceOverlays();
+}
+
+// ── Three.js viewer setup ────────────────────────────────────────────────
+function makeViewer(containerId) {
+  const container = document.getElementById(containerId);
+  const viewer    = container.querySelector('.viewer') || container;
+  const w = viewer.clientWidth  || 400;
+  const h = viewer.clientHeight || 300;
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(w, h);
+  renderer.setClearColor(0x0a0a10);
+  viewer.appendChild(renderer.domElement);
+
+  const scene  = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, w/h, 0.001, 1000);
+  camera.position.set(0, 0, 2);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.8);
+  dl.position.set(1, 2, 3);
+  scene.add(dl);
+
+  // Simple orbit controls
+  let dragging = false, lastX = 0, lastY = 0;
+  let rotX = 0, rotY = 0, zoom = 1;
+  const obj = new THREE.Object3D();
+  scene.add(obj);
+
+  renderer.domElement.addEventListener('mousedown', e => { dragging=true; lastX=e.clientX; lastY=e.clientY; });
+  renderer.domElement.addEventListener('mouseup',   () => dragging=false);
+  renderer.domElement.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    rotY += (e.clientX - lastX) * 0.01;
+    rotX += (e.clientY - lastY) * 0.01;
+    lastX=e.clientX; lastY=e.clientY;
+  });
+  renderer.domElement.addEventListener('wheel', e => { zoom *= (1 + e.deltaY*0.001); });
+
+  function animate() {
+    requestAnimationFrame(animate);
+    obj.rotation.x = rotX;
+    obj.rotation.y = rotY;
+    camera.position.z = zoom;
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  return { scene, obj, camera, renderer };
+}
+
+function loadSTLIntoViewer(b64, viewerObj, infoId) {
+  const binary = atob(b64);
+  const buf    = new Uint8Array(binary.length);
+  for (let i=0; i<binary.length; i++) buf[i] = binary.charCodeAt(i);
+
+  const loader = new THREE.STLLoader();
+  const geom   = loader.parse(buf.buffer);
+  geom.computeBoundingBox();
+  geom.computeVertexNormals();
+
+  // Centre and normalise
+  const box    = geom.boundingBox;
+  const centre = new THREE.Vector3();
+  box.getCenter(centre);
+  const size   = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z);
+  geom.translate(-centre.x, -centre.y, -centre.z);
+
+  // Store bbox info for face overlays (input viewer only)
+  if (viewerObj === sceneIn) {
+    sceneIn.stlInfo = { size: size.clone(), sc: 1.2 / maxDim };
+    setTimeout(updateFaceOverlays, 0);
+  }
+
+  // Remove old mesh
+  viewerObj.obj.children.forEach(c => viewerObj.obj.remove(c));
+
+  const mat  = new THREE.MeshPhongMaterial({ color: 0x4488cc, specular: 0x222244, shininess: 40 });
+  const mesh = new THREE.Mesh(geom, mat);
+  mesh.scale.setScalar(1.2 / maxDim);
+  viewerObj.obj.add(mesh);
+
+  // Info bar
+  const info = document.getElementById(infoId);
+  if (info) {
+    info.style.display = 'block';
+    info.textContent = `${(size.x).toFixed(1)} × ${(size.y).toFixed(1)} × ${(size.z).toFixed(1)} mm  |  ${geom.attributes.position.count/3|0} triangles`;
+  }
+
+  return size;
+}
+
+// ── File handling ────────────────────────────────────────────────────────
+function handleDrop(e) {
+  e.preventDefault();
+  document.getElementById('drop-zone').classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (file) handleFile(file);
+}
+
+function handleFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    const buf  = e.target.result;
+    inputSTLb64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+
+    if (!sceneIn) {
+      document.getElementById('drop-zone').style.display = 'none';
+      sceneIn = makeViewer('viewer-in');
+    }
+
+    const size = loadSTLIntoViewer(inputSTLb64, sceneIn, 'info-in');
+
+    // Update voxel display
+    updateVoxelDisplay(size);
+    document.getElementById('run-btn').disabled = false;
+    log('STL loaded: ' + file.name);
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function updateVoxelDisplay(sizeMM) {
+  const nx = parseInt(document.getElementById('nx').value) || 20;
+  const ny = parseInt(document.getElementById('ny').value) || 20;
+  const nz = parseInt(document.getElementById('nz').value) || 20;
+  if (!sizeMM) return;
+  const hx = (sizeMM.x / nx).toFixed(1);
+  const hy = (sizeMM.y / ny).toFixed(1);
+  const hz = (sizeMM.z / nz).toFixed(1);
+  document.getElementById('voxel-display').innerHTML =
+    `Domain: ${sizeMM.x.toFixed(1)} × ${sizeMM.y.toFixed(1)} × ${sizeMM.z.toFixed(1)} mm<br>` +
+    `Voxel: ${hx} × ${hy} × ${hz} mm`;
+}
+
+['nx','ny','nz'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    if (sceneIn) {
+      const box = sceneIn.obj.children[0]?.geometry?.boundingBox;
+      if (box) {
+        const s = new THREE.Vector3(); box.getSize(s);
+        updateVoxelDisplay(s);
+      }
+    }
+  });
+});
+
+// ── Compliance chart ────────────────────────────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('chart').getContext('2d');
+  complianceChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      label: 'compliance', data: [],
+      borderColor: '#a0c4ff', backgroundColor: 'rgba(160,196,255,0.1)',
+      borderWidth: 1.5, pointRadius: 0, tension: 0.3
+    }]},
+    options: {
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a24' } },
+        y: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a24' } }
+      }
+    }
+  });
+}
+initChart();
+
+function chartPush(iter, val) {
+  complianceChart.data.labels.push(iter);
+  complianceChart.data.datasets[0].data.push(val);
+  complianceChart.update('none');
+}
+
+// ── Log ──────────────────────────────────────────────────────────────────
+function log(msg) {
+  const el = document.getElementById('log');
+  const p  = document.createElement('p');
+  p.textContent = msg;
+  el.appendChild(p);
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Run optimisation ─────────────────────────────────────────────────────
+async function runOptimise() {
+  if (!inputSTLb64) return;
+
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('log').innerHTML = '';
+  complianceChart.data.labels = [];
+  complianceChart.data.datasets[0].data = [];
+  complianceChart.update('none');
+  document.getElementById('progress-bar').style.width = '0%';
+  document.getElementById('progress-bar').style.background = '#2563eb';
+  document.getElementById('iter-counter').textContent = '—';
+
+  // Collect fixed faces
+  const fixedFaces = [];
+  document.querySelectorAll('.face-btn.fixed').forEach(b => fixedFaces.push(b.dataset.face));
+
+  // Collect loads
+  const loads = [];
+  loads.push({
+    face:      document.getElementById('load-face').value,
+    load_type: 'force',
+    value:     parseFloat(document.getElementById('load-mag').value),
+    direction: parseInt(document.getElementById('load-dir').value),
+  });
+
+  // Thermal loads
+  document.querySelectorAll('.flux-face-sel').forEach((sel, i) => {
+    const face = sel.value;
+    const val  = parseFloat(document.querySelectorAll('.flux-val')[i]?.value || 0);
+    if (face && val) loads.push({ face, load_type: 'flux', value: val, direction: 2 });
+  });
+  document.querySelectorAll('.temp-face-sel').forEach((sel, i) => {
+    const face = sel.value;
+    const val  = parseFloat(document.querySelectorAll('.temp-val')[i]?.value || 20);
+    if (face) loads.push({ face, load_type: 'temperature', value: val, direction: 2 });
+  });
+
+  const body = {
+    stl_b64:         inputSTLb64,
+    material:        document.getElementById('material').value,
+    nx:              parseInt(document.getElementById('nx').value),
+    ny:              parseInt(document.getElementById('ny').value),
+    nz:              parseInt(document.getElementById('nz').value),
+    volume_fraction: parseFloat(document.getElementById('vf').value),
+    fixed_faces:     fixedFaces,
+    loads,
+    max_iter:        parseInt(document.getElementById('max-iter').value),
+    filter_radius:   parseFloat(document.getElementById('filter-radius').value),
+    p_simp:          3.0,
+  };
+
+  try {
+    const res = await fetch(`${API}/optimise`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    const reader = res.body.getReader();
+    const dec    = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const ev = JSON.parse(line.slice(6));
+        handleEvent(ev);
+      }
+    }
+  } catch (err) {
+    log('Error: ' + err.message);
+  }
+
+  document.getElementById('run-btn').disabled = false;
+}
+
+function handleEvent(ev) {
+  if (ev.type === 'status') {
+    log(ev.message);
+  } else if (ev.type === 'progress') {
+    chartPush(ev.iteration, ev.compliance);
+
+    // Update progress bar
+    const maxIter = parseInt(document.getElementById('max-iter').value);
+    const pct = Math.min(100, (ev.iteration / maxIter) * 100);
+    document.getElementById('progress-bar').style.width = pct + '%';
+    document.getElementById('iter-counter').textContent =
+        `iter ${ev.iteration} / ${maxIter}`;
+
+    if (ev.iteration % 5 === 0)
+      log(`Iter ${ev.iteration}: C=${ev.compliance.toExponential(3)} Δρ=${ev.change.toFixed(4)}`);
+  } else if (ev.type === 'domain') {
+    const d = ev.info;
+    log(`Domain: ${(d.lx_m*1000).toFixed(1)}×${(d.ly_m*1000).toFixed(1)}×${(d.lz_m*1000).toFixed(1)} mm`);
+  } else if (ev.type === 'done') {
+    document.getElementById('progress-bar').style.width = '100%';
+    document.getElementById('progress-bar').style.background = '#16a34a';
+    document.getElementById('iter-counter').textContent = 'complete';
+    log('Optimisation complete.');
+
+    // Store snapshots and domain for iteration scrubber
+    snapshots  = ev.snapshots  || [];
+    snapIters  = ev.snap_iters || [];
+    domainInfo = ev.domain     || null;
+
+    // Show optimised STL
+    if (!sceneOut) {
+      const viewerEl = document.getElementById('viewer-out');
+      viewerEl.innerHTML = '<div class="info-bar" id="info-out" style="display:none"></div>';
+      sceneOut = makeViewer('viewer-out');
+    }
+    loadSTLIntoViewer(ev.stl_b64, sceneOut, 'info-out');
+    setViewMode('stl');
+
+    // Init voxel mesh and slider if we have snapshots
+    if (snapshots.length > 0 && domainInfo) {
+      initVoxelMesh(sceneOut, domainInfo);
+      const bar = document.getElementById('iter-bar');
+      bar.style.display = 'flex';
+      const sl = document.getElementById('iter-slider');
+      sl.max   = snapshots.length - 1;
+      sl.value = snapshots.length - 1;
+      scrubToIter(snapshots.length - 1);
+      document.getElementById('iter-slider-label').textContent =
+          `iter ${snapIters[snapIters.length - 1]}`;
+    }
+
+    renderReport(ev.report);
+    // Download link
+    const a    = document.createElement('a');
+    const blob = new Blob([Uint8Array.from(atob(ev.stl_b64), c=>c.charCodeAt(0))], {type:'application/octet-stream'});
+    a.href     = URL.createObjectURL(blob);
+    a.download = 'optimised.stl';
+    a.click();
+  } else if (ev.type === 'error') {
+    log('ERROR: ' + ev.message);
+    console.error(ev.trace);
+  }
+}
+
+// ── Face overlays ────────────────────────────────────────────────────────
+
+function updateFaceOverlays() {
+  if (!sceneIn || !sceneIn.stlInfo) return;
+  faceOverlays.forEach(m => sceneIn.obj.remove(m));
+  faceOverlays = [];
+  const {size, sc} = sceneIn.stlInfo;
+
+  const hw = size.x * sc / 2, hh = size.y * sc / 2, hd = size.z * sc / 2;
+  const W = size.x*sc, H = size.y*sc, D = size.z*sc;
+  const faces = {
+    xmin: { pos:[-hw,0,0], w:H, h:D, rx:0,            ry:Math.PI/2,  rz:0 },
+    xmax: { pos:[ hw,0,0], w:H, h:D, rx:0,            ry:-Math.PI/2, rz:0 },
+    ymin: { pos:[0,-hh,0], w:W, h:D, rx:Math.PI/2,    ry:0,          rz:0 },
+    ymax: { pos:[0, hh,0], w:W, h:D, rx:-Math.PI/2,   ry:0,          rz:0 },
+    zmin: { pos:[0,0,-hd], w:W, h:H, rx:0,            ry:0,          rz:0 },
+    zmax: { pos:[0,0, hd], w:W, h:H, rx:Math.PI,      ry:0,          rz:0 },
+  };
+
+  function addOverlay(face, hex, opacity) {
+    const d = faces[face]; if (!d) return;
+    const geo = new THREE.PlaneGeometry(d.w, d.h);
+    const mat = new THREE.MeshBasicMaterial({
+      color:hex, opacity, transparent:true, side:THREE.DoubleSide, depthWrite:false
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(...d.pos);
+    m.rotation.set(d.rx, d.ry, d.rz);
+    sceneIn.obj.add(m);
+    faceOverlays.push(m);
+  }
+
+  document.querySelectorAll('.face-btn.fixed').forEach(b => addOverlay(b.dataset.face, 0x4488ff, 0.30));
+  addOverlay(document.getElementById('load-face').value, 0xff3333, 0.30);
+  document.querySelectorAll('.flux-face-sel').forEach(s => { if (s.value) addOverlay(s.value, 0xff8800, 0.30); });
+  document.querySelectorAll('.temp-face-sel').forEach(s => { if (s.value) addOverlay(s.value, 0xffdd00, 0.30); });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('load-face').addEventListener('change', updateFaceOverlays);
+});
+
+// ── Voxel renderer ───────────────────────────────────────────────────────
+
+function initVoxelMesh(viewerObj, info) {
+  if (voxelInstMesh) viewerObj.obj.remove(voxelInstMesh);
+  const {nx, ny, nz} = info;
+  const lx = info.lx_m*1000, ly = info.ly_m*1000, lz = info.lz_m*1000;
+  const maxDim = Math.max(lx, ly, lz), sc = 1.2 / maxDim;
+  const hx = (lx/nx)*sc*0.92, hy = (ly/ny)*sc*0.92, hz = (lz/nz)*sc*0.92;
+
+  const geo = new THREE.BoxGeometry(hx, hy, hz);
+  const mat = new THREE.MeshPhongMaterial({vertexColors:true, shininess:20});
+  voxelInstMesh = new THREE.InstancedMesh(geo, mat, nx*ny*nz);
+  voxelInstMesh.userData = {nx, ny, nz, lx, ly, lz, sc};
+  voxelInstMesh.visible = false;
+  viewerObj.obj.add(voxelInstMesh);
+}
+
+function updateVoxelMesh(rhoData) {
+  if (!voxelInstMesh) return;
+  const {nx, ny, nz, lx, ly, lz, sc} = voxelInstMesh.userData;
+  const dummy = new THREE.Object3D();
+  const color = new THREE.Color();
+  const cLow  = new THREE.Color(0.10, 0.10, 0.14);
+  const cHigh = new THREE.Color(0.11, 0.62, 0.46);
+  let idx = 0;
+  for (let i=0; i<nx; i++) for (let j=0; j<ny; j++) for (let k=0; k<nz; k++) {
+    const rho = rhoData[idx];
+    dummy.position.set(
+      ((i+0.5)/nx - 0.5)*lx*sc,
+      ((j+0.5)/ny - 0.5)*ly*sc,
+      ((k+0.5)/nz - 0.5)*lz*sc
+    );
+    dummy.scale.setScalar(rho < 0.05 ? 0 : 1);
+    dummy.updateMatrix();
+    voxelInstMesh.setMatrixAt(idx, dummy.matrix);
+    color.lerpColors(cLow, cHigh, Math.min(1, rho * 1.5));
+    voxelInstMesh.setColorAt(idx, color);
+    idx++;
+  }
+  voxelInstMesh.instanceMatrix.needsUpdate = true;
+  if (voxelInstMesh.instanceColor) voxelInstMesh.instanceColor.needsUpdate = true;
+}
+
+function setViewMode(mode) {
+  viewMode = mode;
+  document.getElementById('btn-stl').classList.toggle('active',    mode === 'stl');
+  document.getElementById('btn-voxels').classList.toggle('active', mode === 'voxels');
+  if (sceneOut) {
+    sceneOut.obj.children.forEach(c => {
+      if (c === voxelInstMesh) c.visible = (mode === 'voxels');
+      else if (c.isMesh)       c.visible = (mode === 'stl');
+    });
+  }
+}
+
+function scrubToIter(idx) {
+  if (!snapshots[idx]) return;
+  const raw   = atob(snapshots[idx]);
+  const buf   = new ArrayBuffer(raw.length);
+  const bytes = new Uint8Array(buf);
+  for (let i=0; i<raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  updateVoxelMesh(new Float32Array(buf));
+  document.getElementById('iter-slider-label').textContent = `iter ${snapIters[idx] ?? idx}`;
+  if (viewMode !== 'voxels') setViewMode('voxels');
+}
+
+// ── Mechanical report render ─────────────────────────────────────────────
+function renderReport(r) {
+  const sf    = r.min_safety_factor;
+  const sfCls = sf > 3 ? 'sf-green' : sf > 1.5 ? 'sf-amber' : 'sf-red';
+
+  const rows = [
+    ['Compliance (SIMP)',  r.compliance_simp_Nm?.toExponential(3) + ' N·m'],
+    ['Compliance (real)',  r.compliance_real_Nm?.toExponential(3) + ' N·m'],
+    ['Gap ratio',          (r.gap_ratio_pct ?? 0).toFixed(1) + ' %'],
+    ['Mass',               r.mass_kg?.toFixed(3) + ' kg'],
+    ['Volume fraction',    r.volume_fraction?.toFixed(3)],
+    ['Max von Mises',      r.max_von_mises_mpa?.toFixed(1) + ' MPa'],
+    ['Safety factor',      `<span class="${sfCls}">${sf?.toFixed(2)}</span>`],
+    ['Thermal active',     r.thermal_active ? 'yes' : 'no'],
+    r.max_temp_c != null ? ['Max temperature', r.max_temp_c?.toFixed(1) + ' °C'] : null,
+    ['Wall time',          r.wall_time_s?.toFixed(1) + ' s'],
+  ].filter(Boolean);
+
+  const html = `
+    <div class="report-card">
+      ${rows.map(([l,v]) => `
+        <div class="report-row">
+          <span class="report-label">${l}</span>
+          <span class="report-value">${v}</span>
+        </div>`).join('')}
+    </div>`;
+
+  document.getElementById('report-container').innerHTML = html;
+}
+</script>
+</body>
+</html>

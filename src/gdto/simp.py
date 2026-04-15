@@ -23,7 +23,7 @@ import time
 import numpy as np
 import scipy.sparse.linalg as spla
 from typing import NamedTuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from gdto.mesh_material import ProblemData
 from gdto.filters import DensityFilter, OverhangFilter
@@ -83,6 +83,10 @@ class SIMPResult(NamedTuple):
     # Surrogate training
     design_params: dict
 
+    # Density snapshots for frontend iteration scrubber
+    density_snapshots: list | None = None   # list of float32 np arrays, every N iters
+    snapshot_iters:    list | None = None   # corresponding iteration numbers
+
 
 # ---------------------------------------------------------------------------
 # SIMPConfig — runtime parameters
@@ -104,6 +108,10 @@ class SIMPConfig:
     update_scheme:  str   = "auto"  # "auto" | "OC" | "MMA"
     rho_min:        float = 0.001   # minimum element density
 
+    p_start:  float = 1.0    # starting penalisation
+    p_end:    float = 3.0    # final penalisation (= existing p field)
+    p_steps:  int   = 3      # number of continuation steps
+
     # OC parameters
     oc_move: float = 0.2   # maximum density move per iteration
     oc_eta:  float = 0.5   # OC damping exponent
@@ -119,6 +127,8 @@ class SIMPConfig:
     filter_radius: float = 1.5    # density filter radius in element lengths
     overhang_P:    float = 2.0    # overhang P-norm exponent
     build_axis:    int   = 2      # build direction: 0=X, 1=Y, 2=Z
+
+    snapshot_interval: int = 5   # store density field every N iterations for viewer
 
     @classmethod
     def from_dict(cls, d: dict) -> "SIMPConfig":
@@ -205,7 +215,7 @@ class SIMPSolver:
             build_axis = getattr(config, 'build_axis', 2),
         )
 
-    def solve(self, design_params: dict | None = None) -> SIMPResult:
+    def solve(self, design_params: dict | None = None, on_progress=None) -> SIMPResult:
         """
         Run the SIMP inner loop to convergence.
 
@@ -247,16 +257,29 @@ class SIMPSolver:
         mu_history         = []
         bisect_iters_list  = []
 
+        # Snapshot buffers for frontend iteration scrubber
+        _snap_rhos  = []
+        _snap_iters = []
+
         converged = False
 
         # ── SIMP iteration loop ────────────────────────────────────────────
         for iteration in range(cfg.max_iter):
 
+            # Penalisation continuation — ramp p from p_start to p_end
+            if cfg.p_start < cfg.p_end:
+                p_current = cfg.p_start + (cfg.p_end - cfg.p_start) * min(
+                    1.0, iteration / max(1, cfg.max_iter * 0.8)
+                )
+                p_current = float(np.clip(p_current, cfg.p_start, cfg.p_end))
+            else:
+                p_current = cfg.p
+
             # 1. Filter density field (Decision 11 forward pass)
             rho_filtered = self._density_filter.apply(rho)
 
             # 2. Assemble K and apply BCs using filtered density
-            K         = asm.assemble_K(rho_filtered, p=cfg.p,
+            K         = asm.assemble_K(rho_filtered, p=p_current,
                                        E_min_factor=cfg.E_min_factor)
             K_ff, f_f = bc.apply(K)
 
@@ -269,14 +292,14 @@ class SIMPSolver:
             Ke0_Ue        = Ue @ asm.Ke0.T
             strain_energy = np.einsum('ei,ei->e', Ue, Ke0_Ue)
             compliance    = float(np.dot(
-                cfg.E_min_factor + rho_filtered**cfg.p * (1.0 - cfg.E_min_factor),
+                cfg.E_min_factor + rho_filtered**p_current * (1.0 - cfg.E_min_factor),
                 strain_energy
             ))
 
             # 5. Sensitivity w.r.t filtered density (Decision 7)
             dc_d_rho_filtered = (
-                -cfg.p
-                * rho_filtered ** (cfg.p - 1.0)
+                -p_current
+                * rho_filtered ** (p_current - 1.0)
                 * (1.0 - cfg.E_min_factor)
                 * strain_energy
             )
@@ -285,7 +308,8 @@ class SIMPSolver:
             dc_drho_filtered = self._density_filter.backprop(dc_d_rho_filtered)
 
             # 7. Overhang constraint gradient (Decision 13)
-            V_supp, dV_drho = self._overhang_filter.compute(rho_filtered)
+            # (sensitivity wired into MMA in chunk 3 — unused here)
+            self._overhang_filter.compute(rho_filtered)
 
             # 8. Density update
             rho_old = rho.copy()
@@ -310,7 +334,16 @@ class SIMPSolver:
             mu_history.append(mu)
             bisect_iters_list.append(bisect_iters)
 
-            # 11. Convergence check
+            # Density snapshot for frontend iteration scrubber
+            if cfg.snapshot_interval > 0 and iteration % cfg.snapshot_interval == 0:
+                _snap_rhos.append(rho.copy().astype(np.float32))
+                _snap_iters.append(iteration)
+
+            # 11. Fire progress callback (live streaming)
+            if on_progress is not None:
+                on_progress(iteration + 1, compliance, change)
+
+            # 12. Convergence check
             if change < cfg.tol:
                 converged = True
                 break
@@ -340,6 +373,8 @@ class SIMPSolver:
             scheme_used         = scheme,
             wall_time_s         = wall_time,
             design_params       = dict(design_params),
+            density_snapshots   = _snap_rhos  if _snap_rhos  else None,
+            snapshot_iters      = _snap_iters if _snap_iters else None,
         )
 
     # ── Scheme selection (Decision 8) ─────────────────────────────────────
@@ -603,37 +638,9 @@ class SIMPSolver:
 
     # ── Support volume proxy (Decision 10) ───────────────────────────────
 
-    def _compute_support_volume(
-        self, rho: np.ndarray, v_elem: float
-    ) -> float:
+    def _compute_support_volume(self, rho: np.ndarray, v_elem: float) -> float:  # noqa: ARG002
         V_supp, _ = self._overhang_filter.compute(rho)
         return V_supp
-        """
-        Smooth overhang support volume proxy (Gaynor & Guest 2016).
-
-        For each element, the overhang measure is:
-            o_e = max(0, rho_e - rho_below_e)
-
-        where rho_below_e is the density of the element directly below e
-        in the build direction (Z axis = axis 2 in the 3D grid).
-
-        Support volume = v_elem * sum(o_e)
-
-        This is smooth and differentiable in rho, enabling it to be used
-        as a constraint sensitivity for MMA in chunk 3.
-        """
-        mesh     = self.problem.mesh
-        rho_3d   = rho.reshape(mesh.nx, mesh.ny, mesh.nz)
-
-        # Shift density field up by 1 in Z to get "below" values
-        # rho_below[:,:,k] = rho_3d[:,:,k-1] (element below in Z)
-        # Bottom layer (k=0) has no element below — treat as fully supported
-        rho_below          = np.zeros_like(rho_3d)
-        rho_below[:, :, 1:] = rho_3d[:, :, :-1]
-
-        overhang       = np.maximum(0.0, rho_3d - rho_below)
-        support_volume = float(v_elem * overhang.sum())
-        return support_volume
 
 
 # ---------------------------------------------------------------------------
@@ -644,6 +651,7 @@ def run_simp(
     problem:       ProblemData,
     design_params: dict | None  = None,
     config:        SIMPConfig | None = None,
+    on_progress=None,
 ) -> SIMPResult:
     """
     Run the SIMP inner loop. Convenience wrapper around SIMPSolver.
@@ -668,4 +676,4 @@ def run_simp(
     if config is None:
         config = SIMPConfig()
     solver = SIMPSolver(problem, config)
-    return solver.solve(design_params)
+    return solver.solve(design_params, on_progress=on_progress)
