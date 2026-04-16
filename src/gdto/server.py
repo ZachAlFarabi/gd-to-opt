@@ -272,6 +272,18 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
                     )
                 encoded_iters = result.snapshot_iters or []
 
+            # Stress and temperature fields from verification FEA
+            stress_b64 = None
+            temp_b64   = None
+            if verify_result.stress_field_mpa is not None:
+                stress_b64 = base64.b64encode(
+                    verify_result.stress_field_mpa.astype(np.float32).tobytes()
+                ).decode()
+            if verify_result.temp_field_c is not None:
+                temp_b64 = base64.b64encode(
+                    verify_result.temp_field_c.astype(np.float32).tobytes()
+                ).decode()
+
             yield _sse({
                 "type":       "done",
                 "stl_b64":    stl_b64,
@@ -285,6 +297,8 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
                 "stl_info":   stl_info,
                 "snapshots":  encoded_snaps,
                 "snap_iters": encoded_iters,
+                "stress_b64": stress_b64,
+                "temp_b64":   temp_b64,
                 "domain": {
                     "nx": req.nx, "ny": req.ny, "nz": req.nz,
                     "lx_m": lx, "ly_m": ly, "lz_m": lz,

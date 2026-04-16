@@ -272,8 +272,10 @@
     <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
       <span>Optimised result</span>
       <div class="view-toggle">
-        <button class="view-btn active" id="btn-stl"    onclick="setViewMode('stl')">STL</button>
-        <button class="view-btn"        id="btn-voxels" onclick="setViewMode('voxels')">Density</button>
+        <button class="view-btn active" id="btn-stl"     onclick="setViewMode('stl')">STL</button>
+        <button class="view-btn"        id="btn-density" onclick="setViewMode('density')">Density</button>
+        <button class="view-btn"        id="btn-stress"  onclick="setViewMode('stress')">Stress</button>
+        <button class="view-btn"        id="btn-thermal" onclick="setViewMode('thermal')">Thermal</button>
       </div>
     </div>
     <div class="iter-bar" id="iter-bar">
@@ -281,6 +283,16 @@
       <input type="range" id="iter-slider" min="0" max="0" value="0"
              style="flex:1" oninput="scrubToIter(parseInt(this.value))">
       <span id="iter-slider-label" style="min-width:52px;text-align:right;color:#a0c4ff">—</span>
+    </div>
+    <div id="colorbar-wrap" style="display:none;padding:6px 14px 10px;
+         background:#1a1a24;border-bottom:1px solid #2a2a38">
+      <div style="display:flex;align-items:center;gap:8px">
+        <span id="cb-min" style="font-size:11px;color:#888;min-width:40px;text-align:right">0</span>
+        <div id="cb-gradient" style="flex:1;height:10px;border-radius:5px;
+             background:linear-gradient(to right,#0055ff,#ffffff,#ff2200)"></div>
+        <span id="cb-max" style="font-size:11px;color:#888;min-width:40px">100</span>
+        <span id="cb-unit" style="font-size:11px;color:#555;min-width:28px">MPa</span>
+      </div>
     </div>
     <div class="viewer" id="viewer-out">
       <div style="display:flex;align-items:center;justify-content:center;height:100%;
@@ -302,9 +314,6 @@ const API = 'http://localhost:8000';
 let inputSTLb64 = null;
 let complianceChart = null;
 let sceneIn = null, sceneOut = null;
-let snapshots = [], snapIters = [], domainInfo = null;
-let voxelInstMesh = null, viewMode = 'stl';
-let faceOverlays = [];
 
 // ── Server health check ──────────────────────────────────────────────────
 async function checkHealth() {
@@ -405,8 +414,8 @@ function loadSTLIntoViewer(b64, viewerObj, infoId) {
 
   // Store bbox info for face overlays (input viewer only)
   if (viewerObj === sceneIn) {
-    sceneIn.stlInfo = { size: size.clone(), sc: 1.2 / maxDim };
-    setTimeout(updateFaceOverlays, 0);
+    sceneIn.stlInfo = { size: size.clone(), sc: 1.2 / Math.max(size.x, size.y, size.z) };
+    setTimeout(updateFaceOverlays, 50);
   }
 
   // Remove old mesh
@@ -425,6 +434,209 @@ function loadSTLIntoViewer(b64, viewerObj, infoId) {
   }
 
   return size;
+}
+
+// ── Utilities ────────────────────────────────────────────────────────────
+function decodeF32(b64) {
+  const raw  = atob(b64);
+  const buf  = new ArrayBuffer(raw.length);
+  const view = new Uint8Array(buf);
+  for (let i = 0; i < raw.length; i++) view[i] = raw.charCodeAt(i);
+  return new Float32Array(buf);
+}
+
+// Classic blue→white→red diverging colormap
+function heatColor(t, color) {
+  t = Math.max(0, Math.min(1, t));
+  if (t < 0.5) {
+    const s = t * 2;
+    color.setRGB(s * 0.8, s * 0.8, 1.0);
+  } else {
+    const s = (t - 0.5) * 2;
+    color.setRGB(1.0, (1 - s) * 0.8, (1 - s) * 0.8);
+  }
+}
+
+// ── Colorbar ─────────────────────────────────────────────────────────────
+function showColorbar(minVal, maxVal, unit) {
+  document.getElementById('colorbar-wrap').style.display = 'block';
+  const fmt = v => Math.abs(v) < 0.01 ? Number(v).toExponential(1)
+                 : Math.abs(v) > 9999 ? Number(v).toExponential(1)
+                 : Number(v).toFixed(Math.abs(v) < 10 ? 2 : 1);
+  document.getElementById('cb-min').textContent  = fmt(minVal);
+  document.getElementById('cb-max').textContent  = fmt(maxVal);
+  document.getElementById('cb-unit').textContent = unit;
+}
+
+function hideColorbar() {
+  document.getElementById('colorbar-wrap').style.display = 'none';
+}
+
+// ── Face overlays ────────────────────────────────────────────────────────
+let faceOverlays = [];
+
+function updateFaceOverlays() {
+  if (!sceneIn || !sceneIn.stlInfo) return;
+  faceOverlays.forEach(m => sceneIn.obj.remove(m));
+  faceOverlays = [];
+  const { size, sc } = sceneIn.stlInfo;
+
+  const hw = size.x*sc/2, hh = size.y*sc/2, hd = size.z*sc/2;
+  const W = size.x*sc, H = size.y*sc, D = size.z*sc;
+  const e = 0.018;
+  const faceGeoms = {
+    xmin: { pos:[-(hw+e), 0,      0     ], w:H, h:D, rx:0,           ry: Math.PI/2, rz:0 },
+    xmax: { pos:[ (hw+e), 0,      0     ], w:H, h:D, rx:0,           ry:-Math.PI/2, rz:0 },
+    ymin: { pos:[0,      -(hh+e), 0     ], w:W, h:D, rx: Math.PI/2,  ry:0,          rz:0 },
+    ymax: { pos:[0,       (hh+e), 0     ], w:W, h:D, rx:-Math.PI/2,  ry:0,          rz:0 },
+    zmin: { pos:[0,      0,      -(hd+e)], w:W, h:H, rx:0,           ry:0,          rz:0 },
+    zmax: { pos:[0,      0,       (hd+e)], w:W, h:H, rx:Math.PI,     ry:0,          rz:0 },
+  };
+
+  function addOverlay(face, hex, opacity) {
+    const d = faceGeoms[face]; if (!d) return;
+    const geo = new THREE.PlaneGeometry(d.w * 0.99, d.h * 0.99);
+    const mat = new THREE.MeshBasicMaterial({
+      color: hex, opacity, transparent: true,
+      side: THREE.DoubleSide, depthWrite: false,
+      polygonOffset: true, polygonOffsetFactor: -6, polygonOffsetUnits: -6,
+    });
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(...d.pos);
+    m.rotation.set(d.rx, d.ry, d.rz);
+    sceneIn.obj.add(m);
+    faceOverlays.push(m);
+  }
+
+  document.querySelectorAll('.face-btn.fixed').forEach(b =>
+    addOverlay(b.dataset.face, 0x4499ff, 0.40));
+  const lf = document.getElementById('load-face').value;
+  if (lf) addOverlay(lf, 0xff2222, 0.40);
+  document.querySelectorAll('.flux-face-sel').forEach(s => {
+    if (s.value) addOverlay(s.value, 0xff8800, 0.45);
+  });
+  document.querySelectorAll('.temp-face-sel').forEach(s => {
+    if (s.value) addOverlay(s.value, 0xffee00, 0.45);
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('load-face').addEventListener('change', updateFaceOverlays);
+  document.getElementById('flux-list').addEventListener('change', updateFaceOverlays);
+  document.getElementById('temp-list').addEventListener('change', updateFaceOverlays);
+});
+
+// ── Voxel / heatmap renderer ─────────────────────────────────────────────
+let snapshots  = [], snapIters  = [];
+let stressData = null, thermalData = null, domainInfo = null;
+let voxelInstMesh = null;
+let viewMode = 'stl';
+
+function initVoxelMesh(viewerObj, info) {
+  if (voxelInstMesh) {
+    viewerObj.obj.remove(voxelInstMesh);
+    voxelInstMesh.geometry.dispose();
+    voxelInstMesh.material.dispose();
+    voxelInstMesh = null;
+  }
+  const {nx, ny, nz, lx_m, ly_m, lz_m} = info;
+  const lx = lx_m*1000, ly = ly_m*1000, lz = lz_m*1000;
+  const sc = 1.2 / Math.max(lx, ly, lz);
+  const geo = new THREE.BoxGeometry(
+    (lx/nx)*sc*0.88, (ly/ny)*sc*0.88, (lz/nz)*sc*0.88
+  );
+  // White base so instance colours pass through unchanged
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  voxelInstMesh = new THREE.InstancedMesh(geo, mat, nx*ny*nz);
+  voxelInstMesh.userData = {nx, ny, nz, lx, ly, lz, sc};
+  voxelInstMesh.visible  = false;
+  viewerObj.obj.add(voxelInstMesh);
+}
+
+function paintVoxels(data, colorFn, hideThreshold) {
+  if (!voxelInstMesh || !data) return null;
+  const {nx, ny, nz, lx, ly, lz, sc} = voxelInstMesh.userData;
+  const dummy = new THREE.Object3D();
+  const color = new THREE.Color();
+
+  let dMin =  Infinity, dMax = -Infinity;
+  for (let i = 0; i < data.length; i++) {
+    if (data[i] > dMax) dMax = data[i];
+    if (data[i] < dMin) dMin = data[i];
+  }
+  const range = dMax - dMin || 1;
+
+  let idx = 0;
+  for (let i = 0; i < nx; i++)
+  for (let j = 0; j < ny; j++)
+  for (let k = 0; k < nz; k++) {
+    const val = data[idx];
+    const t   = (val - dMin) / range;
+    dummy.position.set(
+      ((i + 0.5)/nx - 0.5) * lx * sc,
+      ((j + 0.5)/ny - 0.5) * ly * sc,
+      ((k + 0.5)/nz - 0.5) * lz * sc
+    );
+    dummy.scale.setScalar(val <= hideThreshold ? 0 : 1);
+    dummy.updateMatrix();
+    voxelInstMesh.setMatrixAt(idx, dummy.matrix);
+    colorFn(t, color);
+    voxelInstMesh.setColorAt(idx, color);
+    idx++;
+  }
+  voxelInstMesh.instanceMatrix.needsUpdate = true;
+  if (voxelInstMesh.instanceColor)
+    voxelInstMesh.instanceColor.needsUpdate = true;
+
+  return {min: dMin, max: dMax};
+}
+
+function setViewMode(mode) {
+  viewMode = mode;
+  ['stl','density','stress','thermal'].forEach(m => {
+    const b = document.getElementById('btn-' + m);
+    if (b) b.classList.toggle('active', m === mode);
+  });
+
+  const stlMesh = sceneOut
+    ? sceneOut.obj.children.find(c => c.isMesh && c !== voxelInstMesh)
+    : null;
+
+  if (mode === 'stl') {
+    if (stlMesh)       stlMesh.visible      = true;
+    if (voxelInstMesh) voxelInstMesh.visible = false;
+    hideColorbar();
+    return;
+  }
+
+  if (stlMesh)       stlMesh.visible      = false;
+  if (voxelInstMesh) voxelInstMesh.visible = true;
+
+  if (mode === 'density') {
+    if (!snapshots.length) return;
+    const idx = parseInt(document.getElementById('iter-slider')?.value || '0');
+    const rng = paintVoxels(decodeF32(snapshots[idx]), heatColor, 0.02);
+    if (rng) showColorbar(0, 1, 'density');
+    const iterBar = document.getElementById('iter-bar');
+    if (iterBar) iterBar.style.display = 'flex';
+  } else if (mode === 'stress') {
+    if (!stressData) { log('No stress data — run with structural load'); return; }
+    const rng = paintVoxels(stressData, heatColor, 0.0);
+    if (rng) showColorbar(rng.min.toFixed(1), rng.max.toFixed(1), 'MPa');
+  } else if (mode === 'thermal') {
+    if (!thermalData) { log('No thermal data — run with thermal BC'); return; }
+    const rng = paintVoxels(thermalData, heatColor, -Infinity);
+    if (rng) showColorbar(rng.min.toFixed(1), rng.max.toFixed(1), '°C');
+  }
+}
+
+function scrubToIter(idx) {
+  if (!snapshots[idx]) return;
+  const rng = paintVoxels(decodeF32(snapshots[idx]), heatColor, 0.02);
+  const it  = snapIters[idx] ?? idx;
+  const lbl = document.getElementById('iter-slider-label');
+  if (lbl) lbl.textContent = `iter ${it}`;
+  if (rng) showColorbar(0, 1, 'density');
 }
 
 // ── File handling ────────────────────────────────────────────────────────
@@ -620,43 +832,62 @@ function handleEvent(ev) {
     const d = ev.info;
     log(`Domain: ${(d.lx_m*1000).toFixed(1)}×${(d.ly_m*1000).toFixed(1)}×${(d.lz_m*1000).toFixed(1)} mm`);
   } else if (ev.type === 'done') {
-    document.getElementById('progress-bar').style.width = '100%';
+    document.getElementById('progress-bar').style.width      = '100%';
     document.getElementById('progress-bar').style.background = '#16a34a';
-    document.getElementById('iter-counter').textContent = 'complete';
+    document.getElementById('iter-counter').textContent      = 'complete';
     log('Optimisation complete.');
 
-    // Store snapshots and domain for iteration scrubber
-    snapshots  = ev.snapshots  || [];
-    snapIters  = ev.snap_iters || [];
-    domainInfo = ev.domain     || null;
-
-    // Show optimised STL
+    // 1. Create output scene first
     if (!sceneOut) {
       const viewerEl = document.getElementById('viewer-out');
       viewerEl.innerHTML = '<div class="info-bar" id="info-out" style="display:none"></div>';
       sceneOut = makeViewer('viewer-out');
     }
-    loadSTLIntoViewer(ev.stl_b64, sceneOut, 'info-out');
-    setViewMode('stl');
 
-    // Init voxel mesh and slider if we have snapshots
-    if (snapshots.length > 0 && domainInfo) {
+    // 2. Load STL
+    loadSTLIntoViewer(ev.stl_b64, sceneOut, 'info-out');
+
+    // 3. Store field data
+    snapshots   = ev.snapshots  || [];
+    snapIters   = ev.snap_iters || [];
+    domainInfo  = ev.domain     || null;
+    stressData  = ev.stress_b64  ? decodeF32(ev.stress_b64)  : null;
+    thermalData = ev.temp_b64    ? decodeF32(ev.temp_b64)    : null;
+    log(`Fields received — stress: ${stressData ? '✓' : '✗'}  thermal: ${thermalData ? '✓' : '✗'}`);
+
+    // 4. Init instanced voxel mesh
+    if (domainInfo) {
       initVoxelMesh(sceneOut, domainInfo);
-      const bar = document.getElementById('iter-bar');
-      bar.style.display = 'flex';
-      const sl = document.getElementById('iter-slider');
-      sl.max   = snapshots.length - 1;
-      sl.value = snapshots.length - 1;
-      scrubToIter(snapshots.length - 1);
-      document.getElementById('iter-slider-label').textContent =
-          `iter ${snapIters[snapIters.length - 1]}`;
+
+      if (snapshots.length > 0) {
+        const bar = document.getElementById('iter-bar');
+        bar.style.display = 'flex';
+        const sl = document.getElementById('iter-slider');
+        sl.max   = snapshots.length - 1;
+        sl.value = snapshots.length - 1;
+        scrubToIter(snapshots.length - 1);
+      }
+      if (!stressData) {
+        const b = document.getElementById('btn-stress');
+        if (b) { b.disabled = true; b.style.opacity = '0.3'; }
+      }
+      if (!thermalData) {
+        const b = document.getElementById('btn-thermal');
+        if (b) { b.disabled = true; b.style.opacity = '0.3'; }
+      }
     }
 
+    // 5. Default to STL view
+    setViewMode('stl');
     renderReport(ev.report);
-    // Download link
+
+    // 6. Auto-download
     const a    = document.createElement('a');
-    const blob = new Blob([Uint8Array.from(atob(ev.stl_b64), c=>c.charCodeAt(0))], {type:'application/octet-stream'});
-    a.href     = URL.createObjectURL(blob);
+    const blob = new Blob(
+      [Uint8Array.from(atob(ev.stl_b64), c => c.charCodeAt(0))],
+      {type: 'application/octet-stream'}
+    );
+    a.href = URL.createObjectURL(blob);
     a.download = 'optimised.stl';
     a.click();
   } else if (ev.type === 'error') {
@@ -665,130 +896,23 @@ function handleEvent(ev) {
   }
 }
 
-// ── Face overlays ────────────────────────────────────────────────────────
-
-function updateFaceOverlays() {
-  if (!sceneIn || !sceneIn.stlInfo) return;
-  faceOverlays.forEach(m => sceneIn.obj.remove(m));
-  faceOverlays = [];
-  const {size, sc} = sceneIn.stlInfo;
-
-  const hw = size.x * sc / 2, hh = size.y * sc / 2, hd = size.z * sc / 2;
-  const W = size.x*sc, H = size.y*sc, D = size.z*sc;
-  const faces = {
-    xmin: { pos:[-hw,0,0], w:H, h:D, rx:0,            ry:Math.PI/2,  rz:0 },
-    xmax: { pos:[ hw,0,0], w:H, h:D, rx:0,            ry:-Math.PI/2, rz:0 },
-    ymin: { pos:[0,-hh,0], w:W, h:D, rx:Math.PI/2,    ry:0,          rz:0 },
-    ymax: { pos:[0, hh,0], w:W, h:D, rx:-Math.PI/2,   ry:0,          rz:0 },
-    zmin: { pos:[0,0,-hd], w:W, h:H, rx:0,            ry:0,          rz:0 },
-    zmax: { pos:[0,0, hd], w:W, h:H, rx:Math.PI,      ry:0,          rz:0 },
-  };
-
-  function addOverlay(face, hex, opacity) {
-    const d = faces[face]; if (!d) return;
-    const geo = new THREE.PlaneGeometry(d.w, d.h);
-    const mat = new THREE.MeshBasicMaterial({
-      color:hex, opacity, transparent:true, side:THREE.DoubleSide, depthWrite:false
-    });
-    const m = new THREE.Mesh(geo, mat);
-    m.position.set(...d.pos);
-    m.rotation.set(d.rx, d.ry, d.rz);
-    sceneIn.obj.add(m);
-    faceOverlays.push(m);
-  }
-
-  document.querySelectorAll('.face-btn.fixed').forEach(b => addOverlay(b.dataset.face, 0x4488ff, 0.30));
-  addOverlay(document.getElementById('load-face').value, 0xff3333, 0.30);
-  document.querySelectorAll('.flux-face-sel').forEach(s => { if (s.value) addOverlay(s.value, 0xff8800, 0.30); });
-  document.querySelectorAll('.temp-face-sel').forEach(s => { if (s.value) addOverlay(s.value, 0xffdd00, 0.30); });
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('load-face').addEventListener('change', updateFaceOverlays);
-});
-
-// ── Voxel renderer ───────────────────────────────────────────────────────
-
-function initVoxelMesh(viewerObj, info) {
-  if (voxelInstMesh) viewerObj.obj.remove(voxelInstMesh);
-  const {nx, ny, nz} = info;
-  const lx = info.lx_m*1000, ly = info.ly_m*1000, lz = info.lz_m*1000;
-  const maxDim = Math.max(lx, ly, lz), sc = 1.2 / maxDim;
-  const hx = (lx/nx)*sc*0.92, hy = (ly/ny)*sc*0.92, hz = (lz/nz)*sc*0.92;
-
-  const geo = new THREE.BoxGeometry(hx, hy, hz);
-  const mat = new THREE.MeshPhongMaterial({vertexColors:true, shininess:20});
-  voxelInstMesh = new THREE.InstancedMesh(geo, mat, nx*ny*nz);
-  voxelInstMesh.userData = {nx, ny, nz, lx, ly, lz, sc};
-  voxelInstMesh.visible = false;
-  viewerObj.obj.add(voxelInstMesh);
-}
-
-function updateVoxelMesh(rhoData) {
-  if (!voxelInstMesh) return;
-  const {nx, ny, nz, lx, ly, lz, sc} = voxelInstMesh.userData;
-  const dummy = new THREE.Object3D();
-  const color = new THREE.Color();
-  const cLow  = new THREE.Color(0.10, 0.10, 0.14);
-  const cHigh = new THREE.Color(0.11, 0.62, 0.46);
-  let idx = 0;
-  for (let i=0; i<nx; i++) for (let j=0; j<ny; j++) for (let k=0; k<nz; k++) {
-    const rho = rhoData[idx];
-    dummy.position.set(
-      ((i+0.5)/nx - 0.5)*lx*sc,
-      ((j+0.5)/ny - 0.5)*ly*sc,
-      ((k+0.5)/nz - 0.5)*lz*sc
-    );
-    dummy.scale.setScalar(rho < 0.05 ? 0 : 1);
-    dummy.updateMatrix();
-    voxelInstMesh.setMatrixAt(idx, dummy.matrix);
-    color.lerpColors(cLow, cHigh, Math.min(1, rho * 1.5));
-    voxelInstMesh.setColorAt(idx, color);
-    idx++;
-  }
-  voxelInstMesh.instanceMatrix.needsUpdate = true;
-  if (voxelInstMesh.instanceColor) voxelInstMesh.instanceColor.needsUpdate = true;
-}
-
-function setViewMode(mode) {
-  viewMode = mode;
-  document.getElementById('btn-stl').classList.toggle('active',    mode === 'stl');
-  document.getElementById('btn-voxels').classList.toggle('active', mode === 'voxels');
-  if (sceneOut) {
-    sceneOut.obj.children.forEach(c => {
-      if (c === voxelInstMesh) c.visible = (mode === 'voxels');
-      else if (c.isMesh)       c.visible = (mode === 'stl');
-    });
-  }
-}
-
-function scrubToIter(idx) {
-  if (!snapshots[idx]) return;
-  const raw   = atob(snapshots[idx]);
-  const buf   = new ArrayBuffer(raw.length);
-  const bytes = new Uint8Array(buf);
-  for (let i=0; i<raw.length; i++) bytes[i] = raw.charCodeAt(i);
-  updateVoxelMesh(new Float32Array(buf));
-  document.getElementById('iter-slider-label').textContent = `iter ${snapIters[idx] ?? idx}`;
-  if (viewMode !== 'voxels') setViewMode('voxels');
-}
-
 // ── Mechanical report render ─────────────────────────────────────────────
 function renderReport(r) {
-  const sf    = r.min_safety_factor;
-  const sfCls = sf > 3 ? 'sf-green' : sf > 1.5 ? 'sf-amber' : 'sf-red';
+  const sf    = parseFloat(r.min_safety_factor);
+  const sfStr = (r.min_safety_factor == null || !isFinite(sf)) ? '∞' : sf.toFixed(2);
+  const sfCls = (!isFinite(sf) || sf > 3) ? 'sf-green' : sf > 1.5 ? 'sf-amber' : 'sf-red';
 
   const rows = [
-    ['Compliance (SIMP)',  r.compliance_simp_Nm?.toExponential(3) + ' N·m'],
-    ['Compliance (real)',  r.compliance_real_Nm?.toExponential(3) + ' N·m'],
-    ['Gap ratio',          (r.gap_ratio_pct ?? 0).toFixed(1) + ' %'],
-    ['Mass',               r.mass_kg?.toFixed(3) + ' kg'],
-    ['Volume fraction',    r.volume_fraction?.toFixed(3)],
-    ['Max von Mises',      r.max_von_mises_mpa?.toFixed(1) + ' MPa'],
-    ['Safety factor',      `<span class="${sfCls}">${sf?.toFixed(2)}</span>`],
+    ['Compliance (SIMP)',  parseFloat(r.compliance_simp_Nm).toExponential(3) + ' N·m'],
+    ['Compliance (real)',  parseFloat(r.compliance_real_Nm).toExponential(3) + ' N·m'],
+    ['Gap ratio',          parseFloat(r.gap_ratio_pct ?? 0).toFixed(1) + ' %'],
+    ['Mass',               parseFloat(r.mass_kg).toFixed(3) + ' kg'],
+    ['Volume fraction',    parseFloat(r.volume_fraction).toFixed(3)],
+    ['Max von Mises',      parseFloat(r.max_von_mises_mpa).toFixed(1) + ' MPa'],
+    ['Safety factor',      `<span class="${sfCls}">${sfStr}</span>`],
     ['Thermal active',     r.thermal_active ? 'yes' : 'no'],
-    r.max_temp_c != null ? ['Max temperature', r.max_temp_c?.toFixed(1) + ' °C'] : null,
-    ['Wall time',          r.wall_time_s?.toFixed(1) + ' s'],
+    r.max_temp_c != null ? ['Max temperature', parseFloat(r.max_temp_c).toFixed(1) + ' °C'] : null,
+    ['Wall time',          parseFloat(r.wall_time_s).toFixed(1) + ' s'],
   ].filter(Boolean);
 
   const html = `

@@ -110,19 +110,22 @@ def reconstruct_stl(
     surf.process(validate=True)
     surf.fix_normals()
 
-    # 4. Export STL
+    # 4. Convert metres → millimetres before export.
+    # Input STL is assumed mm; output must match for slicer compatibility.
+    surf.apply_scale(1000.0)
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     surf.export(str(output_path), file_type='stl')
 
-    # Bounding box in mm for the report
-    bbox = surf.bounds  # shape (2, 3) in metres
-    size_mm = (bbox[1] - bbox[0]) * 1000
+    # Bounding box — surf is now in mm
+    bbox    = surf.bounds
+    size_mm = bbox[1] - bbox[0]
 
     return {
         "n_vertices":  len(surf.vertices),
         "n_faces":     len(surf.faces),
-        "volume_m3":   float(surf.volume),
+        "volume_m3":   float(surf.volume / 1e9),   # mm³ → m³
         "bbox_mm":     {
             "x": float(size_mm[0]),
             "y": float(size_mm[1]),

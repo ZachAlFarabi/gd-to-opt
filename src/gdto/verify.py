@@ -94,6 +94,10 @@ class VerifyResult(NamedTuple):
     wall_time_s:           float
     report:                dict
 
+    # Per-element fields for frontend heatmaps
+    stress_field_mpa:      np.ndarray | None = None
+    temp_field_c:          np.ndarray | None = None
+
 
 # ---------------------------------------------------------------------------
 # ThermalAssembler
@@ -281,24 +285,28 @@ class ThermalAssembler:
             flux_faces, temp_faces
         )
 
-        # Elimination of fixed temperature DOFs
+        # If no Dirichlet BC provided, K_T is singular (no temperature reference).
+        # Auto-pin one corner node to T_ref to anchor the solution.
+        if len(fixed_dofs) == 0:
+            fixed_dofs = np.array([0], dtype=np.int32)
+            fixed_vals = np.array([20.0], dtype=np.float64)
+
         all_dofs  = np.arange(mesh.n_nodes)
         free_dofs = np.setdiff1d(all_dofs, fixed_dofs)
 
-        # Modify RHS for prescribed temperatures
         if len(fixed_dofs) > 0:
-            f_T[free_dofs] -= K_T[free_dofs, :][:, fixed_dofs] @ fixed_vals
+            f_T[free_dofs] -= np.array(
+                K_T[np.ix_(free_dofs, fixed_dofs)] @ fixed_vals
+            ).ravel()
 
-        K_ff = K_T[free_dofs, :][:, free_dofs].tocsc()
+        K_ff = K_T[np.ix_(free_dofs, free_dofs)].tocsc()
         f_f  = f_T[free_dofs]
 
         T_free = spla.spsolve(K_ff, f_f)
 
         T = np.zeros(mesh.n_nodes)
-        T[free_dofs] = T_free
-        if len(fixed_dofs) > 0:
-            T[fixed_dofs] = fixed_vals
-
+        T[free_dofs]  = T_free
+        T[fixed_dofs] = fixed_vals
         return T
 
 
@@ -440,6 +448,15 @@ def verify(
 
     max_vm_mpa = float(vm.max() / 1e6) if len(vm) > 0 else 0.0
 
+    # Per-element stress field (solid only — expand to full n_elem)
+    vm_full = np.zeros(mesh.n_elem, dtype=np.float32)
+    vm_full[solid_mask] = (vm / 1e6).astype(np.float32)
+
+    # Per-element temperature field (average node temps per element)
+    temp_elem_full = None
+    if run_thermal and T_field is not None:
+        temp_elem_full = T_field[mesh.conn].mean(axis=1).astype(np.float32)
+
     # Safety factor
     if yield_strength_mpa is None:
         # Default: use XY yield from CSV (conservative, lower value)
@@ -473,7 +490,7 @@ def verify(
         "volume_fraction":      round(vol_frac, 4),
         "support_volume_m3":    round(simp_result.support_volume, 6),
         "max_von_mises_mpa":    round(max_vm_mpa, 2),
-        "min_safety_factor":    round(sf, 3),
+        "min_safety_factor":    None if not np.isfinite(sf) else round(sf, 3),
         "yield_strength_mpa":   yield_strength_mpa,
         "material":             mat.name,
         "mesh":                 {"nx": mesh.nx, "ny": mesh.ny, "nz": mesh.nz},
@@ -498,4 +515,6 @@ def verify(
         material               = mat.name,
         wall_time_s            = wall_time,
         report                 = report,
+        stress_field_mpa       = vm_full,
+        temp_field_c           = temp_elem_full,
     )
