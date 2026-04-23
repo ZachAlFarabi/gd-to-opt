@@ -170,20 +170,30 @@ class ThermalAssembler:
         return KTe0
 
     def assemble_KT(
-        self, rho_binary: np.ndarray
+        self, rho_binary: np.ndarray, linear: bool = False
     ) -> sp.csc_matrix:
         """
         Assemble global thermal stiffness matrix K_T.
 
-        Only solid elements (rho > 0.5) contribute fully.
-        Void elements contribute rho_min to prevent singularity.
+        Parameters
+        ----------
+        rho_binary : element densities (binary in verify, continuous in SIMP)
+        linear     : if True, use continuous linear interpolation of conductivity
+                     (for SIMP loop); if False, use binary threshold (for verify)
 
         Returns
         -------
         K_T : sp.csc_matrix, shape (n_nodes, n_nodes)
         """
         mesh    = self.mesh
-        scales  = np.where(rho_binary > 0.5, 1.0, 0.001)
+        # Void elements represent air/insulation, not vacuum.
+        # k_air ≈ 0.026 W/mK; void ratio = max(k_air/k_solid, 0.002).
+        k_void_ratio = max(0.026 / self.k, 0.002)
+        if linear:
+            # Continuous interpolation — avoids all-void problem in early SIMP iters
+            scales = k_void_ratio + rho_binary * (1.0 - k_void_ratio)
+        else:
+            scales = np.where(rho_binary > 0.5, 1.0, k_void_ratio)
 
         KTe_all = scales[:, np.newaxis, np.newaxis] * self._KTe0[np.newaxis]
         data    = KTe_all.ravel()
@@ -271,23 +281,38 @@ class ThermalAssembler:
         rho_binary:  np.ndarray,
         flux_faces:  dict[str, float],
         temp_faces:  dict[str, float],
+        linear:      bool = False,
     ) -> np.ndarray:
         """
         Solve K_T T = f_T for the temperature field.
+
+        Parameters
+        ----------
+        linear : passed through to assemble_KT — use True in SIMP loop
 
         Returns
         -------
         T : np.ndarray, shape (n_nodes,) — temperature at each node [°C]
         """
         mesh = self.mesh
-        K_T  = self.assemble_KT(rho_binary)
+        K_T  = self.assemble_KT(rho_binary, linear=linear)
         f_T, fixed_dofs, fixed_vals = self.build_thermal_load(
             flux_faces, temp_faces
         )
 
         # If no Dirichlet BC provided, K_T is singular (no temperature reference).
-        # Auto-pin one corner node to T_ref to anchor the solution.
+        # Auto-pin one corner node to T_ref to anchor the solution, but warn —
+        # the resulting temperature field is mathematically stable but physically
+        # meaningless without a real heat-sink face.
         if len(fixed_dofs) == 0:
+            import warnings
+            warnings.warn(
+                "No fixed temperature BC provided. K_T is singular — anchoring "
+                "corner node to T_ref=20°C. Temperature field will not be "
+                "physically meaningful. Add a fixed temperature face (heat sink) "
+                "opposite to the flux face for a valid thermal result.",
+                UserWarning, stacklevel=3,
+            )
             fixed_dofs = np.array([0], dtype=np.int32)
             fixed_vals = np.array([20.0], dtype=np.float64)
 
@@ -320,6 +345,7 @@ def verify(
     stl_path:       str | None = None,
     flux_faces:     dict[str, float] | None = None,
     temp_faces:     dict[str, float] | None = None,
+    T_field_precomputed: np.ndarray | None = None,
     yield_strength_mpa: float | None = None,
 ) -> VerifyResult:
     """
@@ -374,8 +400,13 @@ def verify(
         alpha   = tc["alpha"]
         T_ref   = tc["T_ref"]
 
-        th_asm  = ThermalAssembler(mesh, k_th)
-        T_field = th_asm.solve_temperature(rho_binary, flux_faces, temp_faces)
+        if T_field_precomputed is not None:
+            # Reuse the SIMP-converged temperature field — avoids double solve
+            # and keeps thermal loading consistent between optimisation and verify
+            T_field = T_field_precomputed
+        else:
+            th_asm  = ThermalAssembler(mesh, k_th)
+            T_field = th_asm.solve_temperature(rho_binary, flux_faces, temp_faces)
         max_temp = float(T_field.max())
 
         # Element centroid temperatures
@@ -415,42 +446,47 @@ def verify(
     # Add thermal load to mechanical load
     f_total_f = f_mech_f + f_thermal[bc.free_dofs]
 
-    u_free = spla.spsolve(K_ff, f_total_f)
-    u_full = bc.expand(u_free)
-
-    # ── Compliance ────────────────────────────────────────────────────
-    compliance_real = float(np.dot(bc.f, u_full))
-
-    # ── Stress field (solid elements only) ────────────────────────────
-    h_vec = np.array([mesh.lx/mesh.nx, mesh.ly/mesh.ny, mesh.lz/mesh.nz])
-    B_c, _ = asm._strain_displacement(0.0, 0.0, 0.0, h_vec)  # (6, 24)
+    # If total load is negligible (no mechanical + no thermal), skip the stress
+    # solve entirely.  The -1e-6 N K-conditioning fallback would otherwise produce
+    # numerical noise that the percentile colormap stretches to full rainbow.
+    no_load = float(np.linalg.norm(f_total_f)) < 1e-4
 
     solid_mask = rho_binary > 0.5
-    Ue_solid   = u_full[mesh.dof_map[solid_mask]]     # (n_solid, 24)
+    vm_full    = np.zeros(mesh.n_elem, dtype=np.float32)
+    max_vm_mpa = 0.0
+    compliance_real = 0.0
 
-    # Strain at element centroid
-    eps_solid = Ue_solid @ B_c.T                       # (n_solid, 6)
+    if no_load:
+        u_full = np.zeros(mesh.n_dof)
+    else:
+        u_free = spla.spsolve(K_ff, f_total_f)
+        u_full = bc.expand(u_free)
 
-    # Subtract thermal strain for solid elements if thermal solve ran
-    if run_thermal:
-        eps_solid -= eps_th[solid_mask]
+        # ── Compliance ────────────────────────────────────────────────────
+        compliance_real = float(np.dot(bc.f, u_full))
 
-    # Stress
-    sig_solid = eps_solid @ mat.C0.T                   # (n_solid, 6)
+        # ── Stress field (solid elements only) ────────────────────────────
+        h_vec = np.array([mesh.lx/mesh.nx, mesh.ly/mesh.ny, mesh.lz/mesh.nz])
+        B_c, _ = asm._strain_displacement(0.0, 0.0, 0.0, h_vec)  # (6, 24)
 
-    # Von Mises
-    s   = sig_solid
-    dxx = s[:,0] - s[:,1]
-    dyy = s[:,1] - s[:,2]
-    dzz = s[:,2] - s[:,0]
-    vm  = np.sqrt(0.5*(dxx**2 + dyy**2 + dzz**2)
-                  + 3*(s[:,3]**2 + s[:,4]**2 + s[:,5]**2))
+        Ue_solid  = u_full[mesh.dof_map[solid_mask]]     # (n_solid, 24)
+        eps_solid = Ue_solid @ B_c.T                      # (n_solid, 6)
 
-    max_vm_mpa = float(vm.max() / 1e6) if len(vm) > 0 else 0.0
+        # Subtract thermal strain for solid elements if thermal solve ran
+        if run_thermal:
+            eps_solid -= eps_th[solid_mask]
 
-    # Per-element stress field (solid only — expand to full n_elem)
-    vm_full = np.zeros(mesh.n_elem, dtype=np.float32)
-    vm_full[solid_mask] = (vm / 1e6).astype(np.float32)
+        sig_solid = eps_solid @ mat.C0.T                  # (n_solid, 6)
+
+        s   = sig_solid
+        dxx = s[:,0] - s[:,1]
+        dyy = s[:,1] - s[:,2]
+        dzz = s[:,2] - s[:,0]
+        vm  = np.sqrt(0.5*(dxx**2 + dyy**2 + dzz**2)
+                      + 3*(s[:,3]**2 + s[:,4]**2 + s[:,5]**2))
+
+        max_vm_mpa = float(vm.max() / 1e6) if len(vm) > 0 else 0.0
+        vm_full[solid_mask] = (vm / 1e6).astype(np.float32)
 
     # Per-element temperature field (average node temps per element)
     temp_elem_full = None
@@ -496,6 +532,7 @@ def verify(
         "mesh":                 {"nx": mesh.nx, "ny": mesh.ny, "nz": mesh.nz},
         "thermal_active":       run_thermal,
         "max_temp_c":           round(max_temp, 2) if max_temp is not None else None,
+        "stress_label":         "Von Mises (thermoelastic)" if run_thermal else "Von Mises (mechanical)",
         "wall_time_s":          round(wall_time, 2),
     }
     if stl_info:

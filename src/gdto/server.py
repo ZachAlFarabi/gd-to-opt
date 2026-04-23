@@ -32,7 +32,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from gdto.mesh_material import build_problem, MaterialModel
-from gdto.simp import run_simp, SIMPConfig
+from gdto.simp import run_simp, SIMPConfig, ThermalConfig
 from gdto.reconstruct import reconstruct_stl, stl_to_base64, base64_to_stl, stl_to_voxels
 from gdto.verify import verify, THERMAL_CONSTANTS
 
@@ -92,35 +92,37 @@ class VerifyRequest(BaseModel):
 
 def _parse_loads(
     loads: list[LoadConfig],
-) -> tuple[int, float, int, dict[str, float], dict[str, float]]:
+) -> tuple[str, float, int, dict[str, float], dict[str, float], list[tuple]]:
     """
     Parse load list into BC parameters.
 
     Returns
     -------
-    load_face, load_magnitude, load_direction, flux_faces, temp_faces
+    load_face, load_magnitude, load_direction,
+    flux_faces, temp_faces,
+    extra_forces — list of (face, magnitude, direction) for loads 2..N
     """
-    load_face      = "zmax"
-    load_magnitude = -1000.0
-    load_direction = 2
-    flux_faces     = {}
-    temp_faces     = {}
+    force_loads = []    # all non-zero force/pressure loads in order
+    flux_faces  = {}
+    temp_faces  = {}
 
     for load in loads:
-        if load.load_type == "force":
-            load_face      = load.face
-            load_magnitude = load.value
-            load_direction = load.direction
-        elif load.load_type == "pressure":
-            load_face      = load.face
-            load_magnitude = load.value
-            load_direction = load.direction
+        if load.load_type in ("force", "pressure") and load.value != 0:
+            force_loads.append((load.face, load.value, load.direction))
         elif load.load_type == "flux":
             flux_faces[load.face] = load.value
         elif load.load_type == "temperature":
             temp_faces[load.face] = load.value
 
-    return load_face, load_magnitude, load_direction, flux_faces, temp_faces
+    # Primary mechanical load — use negligible value when none specified so
+    # the structural K remains well-conditioned (pure thermal problems are valid)
+    if force_loads:
+        load_face, load_magnitude, load_direction = force_loads[0]
+    else:
+        load_face, load_magnitude, load_direction = "zmax", -1e-6, 2
+
+    extra_forces = force_loads[1:]   # loads 2..N applied via bc.add_load()
+    return load_face, load_magnitude, load_direction, flux_faces, temp_faces, extra_forces
 
 
 def _sse(data: dict) -> str:
@@ -173,7 +175,7 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
             await asyncio.sleep(0)
 
             (load_face, load_magnitude, load_direction,
-             flux_faces, temp_faces) = _parse_loads(req.loads)
+             flux_faces, temp_faces, extra_forces) = _parse_loads(req.loads)
 
             problem = build_problem(
                 material       = req.material,
@@ -184,6 +186,10 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
                 load_direction = load_direction,
                 load_magnitude = load_magnitude,
             )
+
+            # Apply secondary loads directly to the BC load vector
+            for ef_face, ef_mag, ef_dir in extra_forces:
+                problem.bc.add_load(ef_face, ef_dir, ef_mag)
 
             # ── Run SIMP ─────────────────────────────────────────────
             yield _sse({"type": "status", "message": "Running topology optimisation..."})
@@ -198,6 +204,11 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
                 update_scheme   = "auto",
             )
 
+            thermal_cfg = ThermalConfig(
+                flux_faces = flux_faces,
+                temp_faces = temp_faces,
+            )
+
             # Run SIMP in a thread, streaming progress events live via a queue
             progress_q: _queue.Queue = _queue.Queue()
             result_holder: list = [None]
@@ -209,7 +220,9 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
             def _run_simp():
                 try:
                     result_holder[0] = run_simp(
-                        problem, config=cfg, on_progress=_on_progress
+                        problem, config=cfg,
+                        thermal_cfg=thermal_cfg,
+                        on_progress=_on_progress,
                     )
                 except Exception as e:
                     exc_holder[0] = e
@@ -253,9 +266,10 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
             verify_result = await loop.run_in_executor(
                 None, lambda: verify(
                     result, problem,
-                    stl_path   = out_stl,
-                    flux_faces = flux_faces,
-                    temp_faces = temp_faces,
+                    stl_path             = out_stl,
+                    flux_faces           = flux_faces,
+                    temp_faces           = temp_faces,
+                    T_field_precomputed  = getattr(result, 'T_field_final', None),
                 )
             )
 
@@ -354,7 +368,7 @@ async def verify_endpoint(req: VerifyRequest):
         base64_to_stl(req.stl_b64, in_stl)
 
         (load_face, load_magnitude, load_direction,
-         flux_faces, temp_faces) = _parse_loads(req.loads)
+         flux_faces, temp_faces, extra_forces) = _parse_loads(req.loads)
 
         rho_init, domain_info = stl_to_voxels(
             in_stl,
@@ -372,6 +386,8 @@ async def verify_endpoint(req: VerifyRequest):
             load_direction = load_direction,
             load_magnitude = load_magnitude,
         )
+        for ef_face, ef_mag, ef_dir in extra_forces:
+            problem.bc.add_load(ef_face, ef_dir, ef_mag)
 
         from gdto.simp import SIMPResult
         import time

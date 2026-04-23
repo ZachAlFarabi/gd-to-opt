@@ -23,7 +23,7 @@ import time
 import numpy as np
 import scipy.sparse.linalg as spla
 from typing import NamedTuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from gdto.mesh_material import ProblemData
 from gdto.filters import DensityFilter, OverhangFilter
@@ -87,6 +87,9 @@ class SIMPResult(NamedTuple):
     density_snapshots: list | None = None   # list of float32 np arrays, every N iters
     snapshot_iters:    list | None = None   # corresponding iteration numbers
 
+    # Final thermal temperature field (node-level) from last SIMP iteration
+    T_field_final: object = None            # np.ndarray (n_nodes,) | None
+
 
 # ---------------------------------------------------------------------------
 # SIMPConfig — runtime parameters
@@ -108,13 +111,14 @@ class SIMPConfig:
     update_scheme:  str   = "auto"  # "auto" | "OC" | "MMA"
     rho_min:        float = 0.001   # minimum element density
 
-    p_start:  float = 1.0    # starting penalisation
+    p_start:  float = 1.5    # starting penalisation
     p_end:    float = 3.0    # final penalisation (= existing p field)
     p_steps:  int   = 3      # number of continuation steps
 
     # OC parameters
-    oc_move: float = 0.2   # maximum density move per iteration
-    oc_eta:  float = 0.5   # OC damping exponent
+    oc_move:         float = 0.2    # maximum density move per iteration
+    oc_move_thermal: float = 0.05   # slower move limit for thermal-only problems
+    oc_eta:          float = 0.5    # OC damping exponent
 
     # Volume bisection parameters
     bisect_tol:      float = 1e-6   # volume constraint tolerance
@@ -151,6 +155,32 @@ class SIMPConfig:
             overhang_P      = float(d.get("overhang_P",      cls.overhang_P)),
             build_axis      = int(d.get("build_axis",         cls.build_axis)),
         )
+
+
+# ---------------------------------------------------------------------------
+# ThermalConfig — thermal BCs for the SIMP inner loop
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ThermalConfig:
+    """
+    Thermal boundary conditions for the SIMP inner loop.
+
+    When active, a steady-state heat conduction solve runs every SIMP
+    iteration. The resulting temperature field drives a thermal load
+    vector that is added to the mechanical load before the structural
+    solve. The optimiser therefore minimises thermoelastic compliance —
+    the combined response to mechanical and thermal loading.
+
+    flux_faces : face name → heat flux [W/m²]   (Neumann BC)
+    temp_faces : face name → temperature [°C]    (Dirichlet BC)
+    """
+    flux_faces: dict = field(default_factory=dict)
+    temp_faces: dict = field(default_factory=dict)
+
+    @property
+    def active(self) -> bool:
+        return bool(self.flux_faces or self.temp_faces)
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +229,15 @@ class SIMPSolver:
         Solver parameters.
     """
 
-    def __init__(self, problem: ProblemData, config: SIMPConfig) -> None:
+    def __init__(
+        self,
+        problem:     ProblemData,
+        config:      SIMPConfig,
+        thermal_cfg: ThermalConfig | None = None,
+    ) -> None:
         self.problem = problem
         self.config  = config
-        self._mma_state: MMAState | None = None  # ← existing line
+        self._mma_state: MMAState | None = None
 
         # Construct filters (Decision 11-13)
         self._density_filter  = DensityFilter(
@@ -214,6 +249,20 @@ class SIMPSolver:
             P          = getattr(config, 'overhang_P', 2.0),
             build_axis = getattr(config, 'build_axis', 2),
         )
+
+        # Thermal assembler — runs inside SIMP loop when active
+        self._thermal_cfg = thermal_cfg or ThermalConfig()
+        self._thermal_asm = None
+        self._alpha       = 0.0
+        self._T_ref       = 20.0
+
+        if self._thermal_cfg.active:
+            from gdto.verify import ThermalAssembler, THERMAL_CONSTANTS
+            mat_name = problem.material.name
+            tc = THERMAL_CONSTANTS.get(mat_name, THERMAL_CONSTANTS["Ti64"])
+            self._thermal_asm = ThermalAssembler(problem.mesh, k_thermal=tc["k"])
+            self._alpha       = tc["alpha"]
+            self._T_ref       = tc["T_ref"]
 
     def solve(self, design_params: dict | None = None, on_progress=None) -> SIMPResult:
         """
@@ -261,6 +310,9 @@ class SIMPSolver:
         _snap_rhos  = []
         _snap_iters = []
 
+        # Track final temperature field for handoff to verify()
+        _T_field_final = None
+
         converged = False
 
         # ── SIMP iteration loop ────────────────────────────────────────────
@@ -278,31 +330,110 @@ class SIMPSolver:
             # 1. Filter density field (Decision 11 forward pass)
             rho_filtered = self._density_filter.apply(rho)
 
-            # 2. Assemble K and apply BCs using filtered density
-            K         = asm.assemble_K(rho_filtered, p=p_current,
-                                       E_min_factor=cfg.E_min_factor)
-            K_ff, f_f = bc.apply(K)
+            # 2. Assemble structural K and apply BCs
+            K              = asm.assemble_K(rho_filtered, p=p_current,
+                                            E_min_factor=cfg.E_min_factor)
+            K_ff, f_mech_f = bc.apply(K)
 
-            # 3. Solve reduced system
-            u_free = self._solve_linear(K_ff, f_f)
+            # 2b. Thermal solve (every iteration when thermal BCs are active)
+            f_thermal_f  = np.zeros_like(f_mech_f)
+            sig_th_raw   = None   # stored for sensitivity computation below
+
+            if self._thermal_asm is not None:
+                # Binary-ish density for thermal conductivity
+                rho_th  = np.where(rho_filtered > 0.5, 1.0, 0.001)
+
+                T_field = self._thermal_asm.solve_temperature(
+                    rho_th,
+                    self._thermal_cfg.flux_faces,
+                    self._thermal_cfg.temp_faces,
+                )
+
+                # Fix 3 — clamp temperatures to physical range
+                # Prevents thermal load explosion during early iterations
+                # when K_T is poorly conditioned (near-uniform density)
+                T_field = np.clip(T_field, -500.0, 3500.0)
+                _T_field_final = T_field  # track for handoff to verify()
+
+                # Element centroid temperature rise
+                T_elem = T_field[mesh.conn].mean(axis=1)     # (n_elem,)
+                dT     = np.clip(T_elem - self._T_ref, -2000.0, 2000.0)
+
+                # Thermal strain: alpha * dT * [1,1,1,0,0,0]
+                eps_th = np.zeros((mesh.n_elem, 6))
+                eps_th[:, :3] = (self._alpha * dT)[:, np.newaxis]
+                # Fix 1 — SIMP-scale the thermal stress.
+                # C(rho) = scale * C0, so void elements (scale≈Emin)
+                # contribute ~0 thermal load. Without this, void elements
+                # carry full thermal strain -> feedback loop -> divergence.
+                scales_th  = (cfg.E_min_factor
+                              + rho_filtered**p_current
+                              * (1.0 - cfg.E_min_factor))   # (n_elem,)
+
+                # Unscaled thermal stress (stored for sensitivity below)
+                sig_th_raw = eps_th @ prob.material.C0.T    # (n_elem, 6)
+
+                # Scaled thermal stress — what actually drives the load vector
+                sig_th_scaled = sig_th_raw * scales_th[:, np.newaxis]
+
+                # Thermal load: B^T C(rho) eps_th integrated over element
+                h_vec  = np.array([mesh.lx/mesh.nx,
+                                   mesh.ly/mesh.ny,
+                                   mesh.lz/mesh.nz])
+                B_c, _ = asm._strain_displacement(0.0, 0.0, 0.0, h_vec)
+                v_elem = (mesh.lx * mesh.ly * mesh.lz) / mesh.n_elem
+                f_th_e = (sig_th_scaled @ B_c) * v_elem     # (n_elem, 24)
+
+                # Scatter to global and extract free DOFs
+                f_thermal_full = np.zeros(mesh.n_dof)
+                np.add.at(f_thermal_full,
+                          mesh.dof_map.ravel(),
+                          f_th_e.ravel())
+                f_thermal_f = f_thermal_full[bc.free_dofs]
+
+            # 3. Solve combined thermoelastic system
+            u_free = self._solve_linear(K_ff, f_mech_f + f_thermal_f)
             u_full = bc.expand(u_free)
 
-            # 4. Compliance (Decision 10: reuse strain energies)
-            Ue            = u_full[mesh.dof_map]
+            # 4. Thermoelastic compliance C = (f_mech + f_th)^T u
+            Ue            = u_full[mesh.dof_map]              # (n_elem, 24)
             Ke0_Ue        = Ue @ asm.Ke0.T
             strain_energy = np.einsum('ei,ei->e', Ue, Ke0_Ue)
-            compliance    = float(np.dot(
+
+            compliance = float(np.dot(
                 cfg.E_min_factor + rho_filtered**p_current * (1.0 - cfg.E_min_factor),
                 strain_energy
             ))
 
-            # 5. Sensitivity w.r.t filtered density (Decision 7)
+            # 5. Sensitivity of thermoelastic compliance w.r.t rho_filtered
+            # Structural term (existing):
             dc_d_rho_filtered = (
                 -p_current
                 * rho_filtered ** (p_current - 1.0)
                 * (1.0 - cfg.E_min_factor)
                 * strain_energy
             )
+
+            # Fix 2 — direct thermal sensitivity term.
+            # d(f_th)/d(rho_e) = p*rho^(p-1)*(1-Emin) * B_c.T @ sig_th_raw_e * v_elem
+            # Contribution to dC: u_e^T @ d(f_th_e)/d(rho_e)
+            # Without this, optimiser removes conductive paths freely -> divergence
+            if sig_th_raw is not None:
+                h_vec  = np.array([mesh.lx/mesh.nx,
+                                   mesh.ly/mesh.ny,
+                                   mesh.lz/mesh.nz])
+                B_c, _ = asm._strain_displacement(0.0, 0.0, 0.0, h_vec)
+                v_elem = (mesh.lx * mesh.ly * mesh.lz) / mesh.n_elem
+
+                # (n_elem, 24) dot (n_elem, 24) summed → (n_elem,)
+                dc_thermal = (
+                    p_current
+                    * rho_filtered ** (p_current - 1.0)
+                    * (1.0 - cfg.E_min_factor)
+                    * v_elem
+                    * np.einsum('ei,ei->e', Ue, sig_th_raw @ B_c)
+                )
+                dc_d_rho_filtered += dc_thermal
 
             # 6. Chain rule backprop through density filter (Decision 11)
             dc_drho_filtered = self._density_filter.backprop(dc_d_rho_filtered)
@@ -315,8 +446,14 @@ class SIMPSolver:
             rho_old = rho.copy()
 
             if scheme == "OC":
+                # Use a tighter move limit for thermal-only problems —
+                # thermal sensitivity gradients are smaller, so large moves cause oscillation
+                f_mech_magnitude = float(np.linalg.norm(bc.f))
+                move = (cfg.oc_move_thermal
+                        if self._thermal_asm is not None and f_mech_magnitude < 1e-3
+                        else cfg.oc_move)
                 rho, mu, bisect_iters = self._oc_update(
-                    rho, dc_drho_filtered, Vf
+                    rho, dc_drho_filtered, Vf, move=move
                 )
             else:  # MMA
                 # extra_grads (overhang constraint) wired into dual
@@ -375,6 +512,7 @@ class SIMPSolver:
             design_params       = dict(design_params),
             density_snapshots   = _snap_rhos  if _snap_rhos  else None,
             snapshot_iters      = _snap_iters if _snap_iters else None,
+            T_field_final       = _T_field_final,
         )
 
     # ── Scheme selection (Decision 8) ─────────────────────────────────────
@@ -428,6 +566,7 @@ class SIMPSolver:
         rho:      np.ndarray,
         dc_drho:  np.ndarray,
         Vf:       float,
+        move:     float | None = None,
     ) -> tuple[np.ndarray, float, int]:
         """
         Optimality Criteria density update with bisection on volume constraint.
@@ -454,7 +593,7 @@ class SIMPSolver:
         """
         cfg  = self.config
         p    = cfg.oc_eta
-        m    = cfg.oc_move
+        m    = cfg.oc_move if move is None else move
         rmin = cfg.rho_min
 
         # Sensitivities should be negative — use absolute values for bracket
@@ -649,31 +788,19 @@ class SIMPSolver:
 
 def run_simp(
     problem:       ProblemData,
-    design_params: dict | None  = None,
+    design_params: dict | None       = None,
     config:        SIMPConfig | None = None,
+    thermal_cfg:   ThermalConfig | None = None,
     on_progress=None,
 ) -> SIMPResult:
     """
     Run the SIMP inner loop. Convenience wrapper around SIMPSolver.
 
-    Parameters
-    ----------
-    problem : ProblemData
-        From build_problem() in mesh_material.py.
-    design_params : dict, optional
-        GD outer loop design variables. Keys:
-            volume_fraction      (overrides config if present)
-            overhang_weight      (activates MMA if > 0)
-            build_orientation_deg
-            min_feature_size
-    config : SIMPConfig, optional
-        Solver parameters. Uses defaults if not provided.
-
-    Returns
-    -------
-    SIMPResult
+    When thermal_cfg is provided and active, the optimiser minimises
+    thermoelastic compliance — the combined response to mechanical and
+    thermal loading. The thermal solve runs every iteration.
     """
     if config is None:
         config = SIMPConfig()
-    solver = SIMPSolver(problem, config)
+    solver = SIMPSolver(problem, config, thermal_cfg=thermal_cfg)
     return solver.solve(design_params, on_progress=on_progress)

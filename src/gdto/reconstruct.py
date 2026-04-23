@@ -80,7 +80,7 @@ def reconstruct_stl(
     # 3. Marching cubes on padded field
     verts, faces, _, _ = marching_cubes(
         rho_padded,
-        level=threshold,
+        level=max(threshold, 0.51),   # ≥0.51 avoids near-threshold triangle ambiguity
         spacing=(hx, hy, hz),
         allow_degenerate=False,
     )
@@ -106,9 +106,30 @@ def reconstruct_stl(
     if len(components) > 1:
         surf = max(components, key=lambda c: len(c.faces))
 
-    # Clean up — use process() which runs all safe repairs
-    surf.process(validate=True)
+    # Fix non-manifold geometry ────────────────────────────────────────────
+    # Step 1: merge nearly-coincident vertices (primary source of non-manifold edges)
+    surf.merge_vertices(merge_tex=True)
+
+    # Step 2: remove zero-area degenerate faces
+    surf.update_faces(surf.nondegenerate_faces(height=1e-8))
+    surf.remove_unreferenced_vertices()
+
+    # Step 3: consistent winding
     surf.fix_normals()
+
+    # Step 4: attempt hole-filling if not yet watertight
+    if not surf.is_watertight:
+        trimesh.repair.fix_winding(surf)
+        trimesh.repair.fill_holes(surf)
+
+    # Step 5: warn if non-manifold edges remain after all repairs
+    if not surf.is_watertight:
+        import warnings
+        warnings.warn(
+            f"STL has Euler characteristic {surf.euler_number} after repair. "
+            "Non-manifold edges may remain — check with netfabb before printing.",
+            UserWarning,
+        )
 
     # 4. Convert metres → millimetres before export.
     # Input STL is assumed mm; output must match for slicer compatibility.

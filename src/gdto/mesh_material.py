@@ -840,6 +840,18 @@ class BoundaryConditions:
         f[dofs]  = self.load_magnitude / len(node_ids)
         return f
 
+    def add_load(self, face: str, direction: int, magnitude: float) -> None:
+        """
+        Add an additional distributed force to the load vector.
+
+        Distributes `magnitude` [N] uniformly over all nodes on `face`
+        in DOF direction `direction` (0=X, 1=Y, 2=Z).
+        Can be called multiple times to accumulate loads from several faces.
+        """
+        node_ids = self._face_node_ids(face)
+        dofs     = 3 * node_ids + direction
+        self.f[dofs] += magnitude / len(node_ids)
+
     def apply(self, K: sp.csc_matrix) -> tuple[sp.csc_matrix, np.ndarray]:
         """
         Apply Dirichlet BCs to K and f by DOF elimination.
