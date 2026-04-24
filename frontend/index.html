@@ -102,6 +102,104 @@
   .view-btn.active { background:#1e3a5f; border-color:#4080c0; color:#80b4ff; }
   .iter-bar { padding:8px 12px; background:#1a1a24; border-bottom:1px solid #2a2a38;
               display:none; gap:10px; align-items:center; font-size:11px; color:#888; }
+
+  /* ── Mode toggle ── */
+  .mode-toggle {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 12px;
+  }
+  .mode-btn {
+    flex: 1;
+    padding: 5px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    border-radius: 5px;
+    border: 1px solid #2a2a38;
+    background: #1a1a24;
+    color: #666;
+    cursor: pointer;
+    text-align: center;
+    transition: all .15s;
+  }
+  .mode-btn.active {
+    background: #1e3a5f;
+    border-color: #4080c0;
+    color: #80b4ff;
+  }
+
+  /* ── Patch list ── */
+  .patch-list {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin: 8px 0;
+    max-height: 200px;
+    overflow-y: auto;
+  }
+  .patch-item {
+    background: #1e1e2a;
+    border: 1px solid #2a2a38;
+    border-radius: 6px;
+    padding: 7px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+  }
+  .patch-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .patch-info { flex: 1; }
+  .patch-label { font-weight: 600; color: #c8d3e8; display: block; }
+  .patch-detail { color: #555; font-size: 11px; }
+  .patch-del {
+    color: #ff4d6a;
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 3px;
+    opacity: .7;
+  }
+  .patch-del:hover { opacity: 1; }
+
+  /* ── Selection toolbar ── */
+  .sel-toolbar {
+    display: none;
+    gap: 5px;
+    margin: 8px 0;
+    padding: 8px;
+    background: rgba(0,212,170,.06);
+    border: 1px solid rgba(0,212,170,.2);
+    border-radius: 6px;
+    flex-direction: column;
+  }
+  .sel-toolbar.active { display: flex; }
+  .sel-count {
+    font-size: 11px;
+    color: #00d4aa;
+    font-family: monospace;
+  }
+  .sel-row { display: flex; gap: 5px; }
+  .sel-row select, .sel-row input {
+    flex: 1;
+    padding: 4px 8px;
+    font-size: 12px;
+    background: #1e1e2a;
+    border: 1px solid #2a2a38;
+    border-radius: 5px;
+    color: #e0e0e8;
+  }
+  .sel-dir { display: flex; gap: 3px; }
+  .sel-dir input {
+    width: 52px !important;
+    flex: none !important;
+    text-align: center;
+  }
+
+  /* ── Select mode cursor ── */
+  .viewer.select-mode canvas { cursor: crosshair !important; }
 </style>
 </head>
 <body>
@@ -146,8 +244,8 @@
     </div>
 
     <div class="section">
-      <label>SIMP iterations: <span id="iter-label">40</span></label>
-      <input type="range" id="max-iter" min="5" max="150" step="5" value="40"
+      <label>SIMP iterations: <span id="iter-label">80</span></label>
+      <input type="range" id="max-iter" min="5" max="200" step="5" value="80"
              oninput="document.getElementById('iter-label').textContent=this.value">
     </div>
 
@@ -158,87 +256,166 @@
     </div>
 
     <!-- Boundary conditions -->
-    <div class="section">
-      <div class="tab-row" style="padding:0 0 8px">
-        <div class="tab active" onclick="switchLoadTab('structural',this)">Structural</div>
-        <div class="tab" onclick="switchLoadTab('thermal',this)">Thermal</div>
+    <div class="section" id="bc-section">
+
+      <!-- Mode toggle -->
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="btn-simple-mode"
+                onclick="setBCMode('simple')">Simple (faces)</button>
+        <button class="mode-btn" id="btn-patch-mode"
+                onclick="setBCMode('patch')">Advanced (patches)</button>
       </div>
 
-      <div id="tab-structural">
-        <label>Fixed faces (click to toggle)</label>
-        <div class="face-grid" id="fixed-face-grid">
-          <div class="face-btn fixed" data-face="zmin" onclick="toggleFixed(this)">zmin</div>
-          <div class="face-btn" data-face="zmax" onclick="toggleFixed(this)">zmax</div>
-          <div class="face-btn" data-face="xmin" onclick="toggleFixed(this)">xmin</div>
-          <div class="face-btn" data-face="xmax" onclick="toggleFixed(this)">xmax</div>
-          <div class="face-btn" data-face="ymin" onclick="toggleFixed(this)">ymin</div>
-          <div class="face-btn" data-face="ymax" onclick="toggleFixed(this)">ymax</div>
+      <!-- ── SIMPLE MODE (existing UI preserved) ── -->
+      <div id="simple-mode-ui">
+        <div class="tab-row" style="padding:0 0 8px">
+          <div class="tab active" onclick="switchLoadTab('structural',this)">Structural</div>
+          <div class="tab" onclick="switchLoadTab('thermal',this)">Thermal</div>
         </div>
-        <div style="margin-top:10px">
-          <label>Load 1</label>
-          <div class="grid-3" style="margin-top:4px">
-            <select id="load-face">
-              <option value="">— none —</option>
-              <option value="zmax">zmax</option>
-              <option value="zmin">zmin</option>
-              <option value="xmin">xmin</option>
-              <option value="xmax">xmax</option>
-              <option value="ymin">ymin</option>
-              <option value="ymax">ymax</option>
-            </select>
-            <input type="number" id="load-mag" value="-1000" placeholder="N">
-            <select id="load-dir">
-              <option value="2">Z</option>
-              <option value="0">X</option>
-              <option value="1">Y</option>
-            </select>
+
+        <div id="tab-structural">
+          <label>Fixed faces (click to toggle)</label>
+          <div class="face-grid" id="fixed-face-grid">
+            <div class="face-btn fixed" data-face="zmin" onclick="toggleFixed(this)">zmin</div>
+            <div class="face-btn" data-face="zmax" onclick="toggleFixed(this)">zmax</div>
+            <div class="face-btn" data-face="xmin" onclick="toggleFixed(this)">xmin</div>
+            <div class="face-btn" data-face="xmax" onclick="toggleFixed(this)">xmax</div>
+            <div class="face-btn" data-face="ymin" onclick="toggleFixed(this)">ymin</div>
+            <div class="face-btn" data-face="ymax" onclick="toggleFixed(this)">ymax</div>
           </div>
-          <label style="margin-top:8px;display:block">Load 2 <span style="color:#555;font-size:10px">(different magnitude or face changes topology)</span></label>
-          <div class="grid-3" style="margin-top:4px">
-            <select id="load-face-2">
-              <option value="">— none —</option>
-              <option value="zmax">zmax</option>
-              <option value="zmin">zmin</option>
-              <option value="xmin">xmin</option>
-              <option value="xmax">xmax</option>
-              <option value="ymin">ymin</option>
-              <option value="ymax">ymax</option>
-            </select>
-            <input type="number" id="load-mag-2" value="0" placeholder="N">
-            <select id="load-dir-2">
-              <option value="2">Z</option>
-              <option value="0">X</option>
-              <option value="1">Y</option>
-            </select>
+          <div style="margin-top:10px">
+            <label>Load 1</label>
+            <div class="grid-3" style="margin-top:4px">
+              <select id="load-face">
+                <option value="">— none —</option>
+                <option value="zmax">zmax</option>
+                <option value="zmin">zmin</option>
+                <option value="xmin">xmin</option>
+                <option value="xmax">xmax</option>
+                <option value="ymin">ymin</option>
+                <option value="ymax">ymax</option>
+              </select>
+              <input type="number" id="load-mag" value="-1000" placeholder="N">
+              <select id="load-dir">
+                <option value="2">Z</option>
+                <option value="0">X</option>
+                <option value="1">Y</option>
+              </select>
+            </div>
+            <label style="margin-top:8px;display:block">Load 2 <span style="color:#555;font-size:10px">(different magnitude or face changes topology)</span></label>
+            <div class="grid-3" style="margin-top:4px">
+              <select id="load-face-2">
+                <option value="">— none —</option>
+                <option value="zmax">zmax</option>
+                <option value="zmin">zmin</option>
+                <option value="xmin">xmin</option>
+                <option value="xmax">xmax</option>
+                <option value="ymin">ymin</option>
+                <option value="ymax">ymax</option>
+              </select>
+              <input type="number" id="load-mag-2" value="0" placeholder="N">
+              <select id="load-dir-2">
+                <option value="2">Z</option>
+                <option value="0">X</option>
+                <option value="1">Y</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div id="tab-thermal" style="display:none">
+          <label>Heat flux faces (W/m²)</label>
+          <div id="flux-list">
+            <div class="grid-2" style="margin-bottom:6px">
+              <select class="flux-face-sel">
+                <option value="">-- none --</option>
+                <option value="zmin">zmin</option><option value="zmax">zmax</option>
+                <option value="xmin">xmin</option><option value="xmax">xmax</option>
+                <option value="ymin">ymin</option><option value="ymax">ymax</option>
+              </select>
+              <input type="number" class="flux-val" placeholder="W/m²" value="500">
+            </div>
+          </div>
+          <label style="margin-top:10px">Fixed temperature faces (°C)</label>
+          <div id="temp-list">
+            <div class="grid-2">
+              <select class="temp-face-sel">
+                <option value="">-- none --</option>
+                <option value="zmin">zmin</option><option value="zmax">zmax</option>
+                <option value="xmin">xmin</option><option value="xmax">xmax</option>
+                <option value="ymin">ymin</option><option value="ymax">ymax</option>
+              </select>
+              <input type="number" class="temp-val" placeholder="°C" value="20">
+            </div>
           </div>
         </div>
       </div>
 
-      <div id="tab-thermal" style="display:none">
-        <label>Heat flux faces (W/m²)</label>
-        <div id="flux-list">
-          <div class="grid-2" style="margin-bottom:6px">
-            <select class="flux-face-sel">
-              <option value="">-- none --</option>
-              <option value="zmin">zmin</option><option value="zmax">zmax</option>
-              <option value="xmin">xmin</option><option value="xmax">xmax</option>
-              <option value="ymin">ymin</option><option value="ymax">ymax</option>
-            </select>
-            <input type="number" class="flux-val" placeholder="W/m²" value="500">
+      <!-- ── PATCH MODE (new dynamic BC UI) ── -->
+      <div id="patch-mode-ui" style="display:none">
+
+        <!-- Step 1: select triangles -->
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <label style="margin:0">Surface patches</label>
+          <div style="display:flex;gap:4px">
+            <button class="btn-sm" id="btn-select-toggle" onclick="toggleSelectMode()">
+              ✦ Select
+            </button>
+            <button class="btn-sm" onclick="clearSelection()"
+                    style="color:#ff4d6a;border-color:#ff4d6a">✕ Clear</button>
           </div>
         </div>
-        <label style="margin-top:10px">Fixed temperature faces (°C)</label>
-        <div id="temp-list">
-          <div class="grid-2">
-            <select class="temp-face-sel">
-              <option value="">-- none --</option>
-              <option value="zmin">zmin</option><option value="zmax">zmax</option>
-              <option value="xmin">xmin</option><option value="xmax">xmax</option>
-              <option value="ymin">ymin</option><option value="ymax">ymax</option>
+
+        <p style="font-size:11px;color:#555;margin-bottom:8px">
+          Click <strong>Select</strong> then click any triangle on the 3D model.
+          Adjacent triangles with similar normals are auto-selected.
+        </p>
+
+        <!-- Tolerance slider -->
+        <div style="margin-bottom:8px;font-size:11px;color:#888;display:flex;gap:8px;align-items:center">
+          <span>Angle tolerance</span>
+          <input type="range" id="flood-tol" min="5" max="60" value="25" step="5"
+                 style="flex:1" oninput="document.getElementById('flood-tol-label').textContent=this.value+'°'">
+          <span id="flood-tol-label" style="min-width:28px;color:#a0c4ff">25°</span>
+        </div>
+
+        <!-- Active selection info bar -->
+        <div class="sel-toolbar" id="sel-toolbar">
+          <div class="sel-count" id="sel-count">0 triangles selected (0.00 mm²)</div>
+          <div class="sel-row">
+            <select id="patch-bc-type" onchange="updateBCInputs()">
+              <option value="fixed">Fixed (structural)</option>
+              <option value="force" selected>Force (N)</option>
+              <option value="pressure">Pressure (N/m²)</option>
+              <option value="flux">Heat flux (W/m²)</option>
+              <option value="temperature">Fixed temp (°C)</option>
             </select>
-            <input type="number" class="temp-val" placeholder="°C" value="20">
+            <input type="number" id="patch-value" value="1000" placeholder="magnitude (positive)"
+                   title="Always positive — direction field sets the sign">
+          </div>
+          <div class="sel-row" id="patch-dir-row">
+            <span style="font-size:11px;color:#888;width:28px;flex-shrink:0">dir</span>
+            <div class="sel-dir">
+              <input type="number" id="patch-dx" value="0"  step="0.1" placeholder="dx">
+              <input type="number" id="patch-dy" value="-1" step="0.1" placeholder="dy">
+              <input type="number" id="patch-dz" value="0"  step="0.1" placeholder="dz">
+            </div>
+          </div>
+          <div class="sel-row">
+            <input type="text" id="patch-label" placeholder="Label (e.g. bolt face)"
+                   style="flex:1">
+            <button class="btn btn-primary" style="flex-shrink:0;width:auto;padding:5px 12px"
+                    onclick="addPatch()">Add patch</button>
           </div>
         </div>
+
+        <!-- Patch list -->
+        <div class="patch-list" id="patch-list">
+          <div style="font-size:11px;color:#555;text-align:center;padding:12px">
+            No patches defined yet
+          </div>
+        </div>
+
       </div>
     </div>
 
@@ -436,8 +613,16 @@ function loadSTLIntoViewer(b64, viewerObj, infoId) {
   // Centre geometry (vertices stay in original units; scale applied via mesh.scale)
   geom.translate(-centre.x, -centre.y, -centre.z);
 
-  // Remove old meshes
-  viewerObj.obj.children.slice().forEach(c => viewerObj.obj.remove(c));
+  // Remove old meshes — preserve patch overlays for input viewer
+  if (viewerObj === sceneOut) {
+    // Clear output viewer completely on new result
+    viewerObj.obj.children.slice().forEach(c => viewerObj.obj.remove(c));
+  } else {
+    // For input viewer: only remove the STL mesh, keep patch/selection overlays
+    viewerObj.obj.children
+      .filter(c => c !== selHighlight && !patchHighlights.includes(c))
+      .forEach(c => viewerObj.obj.remove(c));
+  }
 
   const mat = new THREE.MeshPhongMaterial({
     color:        0x5599dd,
@@ -466,8 +651,17 @@ function loadSTLIntoViewer(b64, viewerObj, infoId) {
   }
 
   if (viewerObj === sceneIn) {
+    stlGeomIn = geom;
     sceneIn.stlInfo = { size: size.clone(), sc };
-    setTimeout(updateFaceOverlays, 50);
+    setTimeout(() => {
+      updateFaceOverlays();
+      renderPatchHighlights();
+    }, 50);
+    if (!sceneIn._clickWired) {
+      sceneIn.renderer.domElement.addEventListener('click',
+        e => onViewerClick(e, sceneIn));
+      sceneIn._clickWired = true;
+    }
   }
 
   return size;
@@ -826,7 +1020,12 @@ function initChart() {
       plugins: { legend: { display: false } },
       scales: {
         x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a24' } },
-        y: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a24' } }
+        y: {
+          ticks: { color: '#555', font: { size: 10 },
+            callback: v => v.toExponential(1)
+          },
+          grid: { color: '#1a1a24' }
+        }
       }
     }
   });
@@ -860,63 +1059,27 @@ async function runOptimise() {
   document.getElementById('progress-bar').style.width = '0%';
   document.getElementById('progress-bar').style.background = '#2563eb';
   document.getElementById('iter-counter').textContent = '—';
+  // DO NOT clear patch overlays on run — user needs to see BCs during optimisation
+  // renderPatchHighlights() is intentionally NOT called here
 
-  // Collect fixed faces
-  const fixedFaces = [];
-  document.querySelectorAll('.face-btn.fixed').forEach(b => fixedFaces.push(b.dataset.face));
-
-  // Thermal validation — warn if flux set but no fixed temperature anchor
-  const hasFlux = Array.from(document.querySelectorAll('.flux-face-sel')).some(s => s.value);
-  const hasTemp = Array.from(document.querySelectorAll('.temp-face-sel')).some(s => s.value);
-  if (hasFlux && !hasTemp) {
-    const proceed = confirm(
-      'Warning: heat flux is set but no fixed temperature face.\n\n' +
-      'Without a heat sink the thermal problem is physically undefined — ' +
-      'only a single corner node will be anchored to 20°C.\n\n' +
-      'Recommended: set a fixed temperature on the opposite face to the flux ' +
-      '(e.g. flux on ymax → fixed temp on xmin).\n\n' +
-      'Proceed anyway?'
-    );
-    if (!proceed) { document.getElementById('run-btn').disabled = false; return; }
+  // Thermal validation (simple mode only) — warn if flux set but no fixed temperature anchor
+  if (bcMode === 'simple') {
+    const hasFlux = Array.from(document.querySelectorAll('.flux-face-sel')).some(s => s.value);
+    const hasTemp = Array.from(document.querySelectorAll('.temp-face-sel')).some(s => s.value);
+    if (hasFlux && !hasTemp) {
+      const proceed = confirm(
+        'Warning: heat flux is set but no fixed temperature face.\n\n' +
+        'Without a heat sink the thermal problem is physically undefined — ' +
+        'only a single corner node will be anchored to 20°C.\n\n' +
+        'Recommended: set a fixed temperature on the opposite face to the flux ' +
+        '(e.g. flux on ymax → fixed temp on xmin).\n\n' +
+        'Proceed anyway?'
+      );
+      if (!proceed) { document.getElementById('run-btn').disabled = false; return; }
+    }
   }
 
-  // Collect loads
-  const loads = [];
-  // Load 1 — only add if a face is selected and magnitude is non-zero
-  const lf1 = document.getElementById('load-face').value;
-  const lm1 = parseFloat(document.getElementById('load-mag').value);
-  if (lf1 && lm1 !== 0 && !isNaN(lm1)) {
-    loads.push({
-      face:      lf1,
-      load_type: 'force',
-      value:     lm1,
-      direction: parseInt(document.getElementById('load-dir').value),
-    });
-  }
-
-  // Load 2 — only if a face is selected and magnitude is non-zero
-  const lf2 = document.getElementById('load-face-2').value;
-  const lm2 = parseFloat(document.getElementById('load-mag-2').value);
-  if (lf2 && lm2 !== 0 && !isNaN(lm2)) {
-    loads.push({
-      face:      lf2,
-      load_type: 'force',
-      value:     lm2,
-      direction: parseInt(document.getElementById('load-dir-2').value),
-    });
-  }
-
-  // Thermal loads
-  document.querySelectorAll('.flux-face-sel').forEach((sel, i) => {
-    const face = sel.value;
-    const val  = parseFloat(document.querySelectorAll('.flux-val')[i]?.value || 0);
-    if (face && val) loads.push({ face, load_type: 'flux', value: val, direction: 2 });
-  });
-  document.querySelectorAll('.temp-face-sel').forEach((sel, i) => {
-    const face = sel.value;
-    const val  = parseFloat(document.querySelectorAll('.temp-val')[i]?.value || 20);
-    if (face) loads.push({ face, load_type: 'temperature', value: val, direction: 2 });
-  });
+  const { patches: reqPatches, fixed_faces: fixedFaces, loads } = collectBCsForRequest();
 
   const body = {
     stl_b64:         inputSTLb64,
@@ -927,6 +1090,7 @@ async function runOptimise() {
     volume_fraction: parseFloat(document.getElementById('vf').value),
     fixed_faces:     fixedFaces,
     loads,
+    patches:         reqPatches,
     max_iter:        parseInt(document.getElementById('max-iter').value),
     filter_radius:   parseFloat(document.getElementById('filter-radius').value),
     p_simp:          3.0,
@@ -1034,6 +1198,286 @@ function handleEvent(ev) {
     log('ERROR: ' + ev.message);
     console.error(ev.trace);
   }
+}
+
+// ── Patch state ───────────────────────────────────────────────────────────────
+let bcMode         = 'simple';
+let selectMode     = false;
+let selectedTris   = new Set();
+let patches        = [];
+let selHighlight   = null;
+let patchHighlights = [];
+let stlGeomIn      = null;
+
+const PATCH_COLORS = {
+  fixed:       0x00ff88,   // bright green — clearly distinct from blue STL
+  force:       0xff2222,   // red
+  pressure:    0xff8844,   // orange
+  flux:        0xff8800,   // amber
+  temperature: 0xffee00,   // yellow
+};
+
+// ── Mode switching ────────────────────────────────────────────────────────────
+function setBCMode(mode) {
+  bcMode = mode;
+  document.getElementById('btn-simple-mode').classList.toggle('active', mode === 'simple');
+  document.getElementById('btn-patch-mode').classList.toggle('active',  mode === 'patch');
+  document.getElementById('simple-mode-ui').style.display = mode === 'simple' ? '' : 'none';
+  document.getElementById('patch-mode-ui').style.display  = mode === 'patch'  ? '' : 'none';
+
+  if (mode === 'simple') {
+    disableSelectMode();
+    updateFaceOverlays();
+  } else {
+    faceOverlays.forEach(m => sceneIn?.obj.remove(m));
+    faceOverlays = [];
+    renderPatchHighlights();
+  }
+}
+
+// ── Select mode toggle ────────────────────────────────────────────────────────
+function toggleSelectMode() {
+  selectMode = !selectMode;
+  const btn = document.getElementById('btn-select-toggle');
+  btn.textContent       = selectMode ? '✦ Selecting...' : '✦ Select';
+  btn.style.borderColor = selectMode ? '#00d4aa' : '#2a2a38';
+  btn.style.color       = selectMode ? '#00d4aa' : '#888';
+  document.getElementById('viewer-in').classList.toggle('select-mode', selectMode);
+}
+
+function disableSelectMode() {
+  selectMode = false;
+  const btn = document.getElementById('btn-select-toggle');
+  if (btn) {
+    btn.textContent       = '✦ Select';
+    btn.style.borderColor = '#2a2a38';
+    btn.style.color       = '#888';
+  }
+  document.getElementById('viewer-in')?.classList.remove('select-mode');
+}
+
+// ── Triangle click handler ────────────────────────────────────────────────────
+function onViewerClick(event, viewerObj) {
+  if (!selectMode || viewerObj !== sceneIn || !sceneIn.obj.children.length) return;
+
+  const canvas = viewerObj.renderer.domElement;
+  const rect   = canvas.getBoundingClientRect();
+  const x      =  ((event.clientX - rect.left)  / rect.width)  * 2 - 1;
+  const y      = -((event.clientY - rect.top)   / rect.height) * 2 + 1;
+
+  const raycaster = new THREE.Raycaster();
+  raycaster.setFromCamera({x, y}, viewerObj.camera);
+
+  const stlMesh = viewerObj.obj.children.find(c => c.isMesh && c !== selHighlight);
+  if (!stlMesh) return;
+
+  const hits = raycaster.intersectObject(stlMesh);
+  if (!hits.length) return;
+
+  const faceIdx = hits[0].faceIndex;
+  log(`Seed triangle: ${faceIdx} — flood-filling...`);
+
+  const tol = parseFloat(document.getElementById('flood-tol').value);
+  fetch(`${API}/flood_fill`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ stl_b64: inputSTLb64, seed_tri: faceIdx, angle_tol_deg: tol }),
+  })
+  .then(r => r.json())
+  .then(data => {
+    selectedTris = new Set(data.tri_indices);
+    const area   = data.total_area_mm2?.toFixed(1) ?? '?';
+    document.getElementById('sel-count').textContent =
+      `${data.n_triangles} triangles selected (${area} mm²)`;
+    document.getElementById('sel-toolbar').classList.add('active');
+    log(`Selected ${data.n_triangles} triangles (${area} mm²) — avg normal: [${data.avg_normal?.map(v=>v.toFixed(2)).join(', ')}]`);
+    highlightSelection(data.tri_indices);
+  })
+  .catch(err => log('Flood fill error: ' + err.message));
+}
+
+// ── Visual highlight of selected triangles ────────────────────────────────────
+function highlightSelection(triIndices) {
+  if (!sceneIn || !stlGeomIn) return;
+
+  if (selHighlight) {
+    sceneIn.obj.remove(selHighlight);
+    selHighlight.geometry.dispose();
+    selHighlight = null;
+  }
+
+  const positions    = stlGeomIn.attributes.position.array;
+  const newPositions = [];
+
+  for (const ti of triIndices) {
+    for (let v = 0; v < 3; v++) {
+      const idx = ti * 3 + v;
+      newPositions.push(positions[idx*3], positions[idx*3+1], positions[idx*3+2]);
+    }
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(newPositions, 3));
+  geo.computeVertexNormals();
+
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x00d4aa, transparent: true, opacity: 0.5,
+    side: THREE.DoubleSide, depthWrite: false,
+  });
+
+  selHighlight = new THREE.Mesh(geo, mat);
+  selHighlight.scale.copy(sceneIn.obj.children[0].scale);
+  sceneIn.obj.add(selHighlight);
+}
+
+// ── BC input visibility ───────────────────────────────────────────────────────
+function updateBCInputs() {
+  const type     = document.getElementById('patch-bc-type').value;
+  const dirRow   = document.getElementById('patch-dir-row');
+  const valInput = document.getElementById('patch-value');
+
+  dirRow.style.display = ['force','flux'].includes(type) ? '' : 'none';
+
+  const placeholders = { fixed:'0', force:'N total', pressure:'N/m²', flux:'W/m²', temperature:'°C' };
+  valInput.placeholder = placeholders[type] || 'value';
+
+  const defaults = { fixed:0, force:1000, pressure:1e6, flux:500, temperature:20 };
+  valInput.value = defaults[type] ?? '';
+}
+
+// ── Add patch ─────────────────────────────────────────────────────────────────
+function addPatch() {
+  if (selectedTris.size === 0) {
+    alert('No triangles selected — click Select then click the model');
+    return;
+  }
+
+  const type  = document.getElementById('patch-bc-type').value;
+  const value = parseFloat(document.getElementById('patch-value').value);
+  const label = document.getElementById('patch-label').value
+                || `${type} patch ${patches.length + 1}`;
+
+  let direction = null;
+  if (['force','flux'].includes(type)) {
+    const dx = parseFloat(document.getElementById('patch-dx').value) || 0;
+    const dy = parseFloat(document.getElementById('patch-dy').value) || 0;
+    const dz = parseFloat(document.getElementById('patch-dz').value) || 0;
+    const len = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (len > 1e-10) direction = [dx/len, dy/len, dz/len];
+  }
+
+  patches.push({ tri_indices: Array.from(selectedTris), bc_type: type, value, direction, label });
+  renderPatchList();
+  renderPatchHighlights();
+  clearSelection();
+  log(`Added patch "${label}": ${type} on ${patches[patches.length-1].tri_indices.length} triangles`);
+}
+
+function clearSelection() {
+  selectedTris = new Set();
+  document.getElementById('sel-toolbar').classList.remove('active');
+  document.getElementById('sel-count').textContent = '0 triangles selected';
+  if (selHighlight && sceneIn) {
+    sceneIn.obj.remove(selHighlight);
+    selHighlight = null;
+  }
+}
+
+function deletePatch(idx) {
+  patches.splice(idx, 1);
+  renderPatchList();
+  renderPatchHighlights();
+}
+
+// ── Patch list render ─────────────────────────────────────────────────────────
+function renderPatchList() {
+  const el = document.getElementById('patch-list');
+  if (patches.length === 0) {
+    el.innerHTML = '<div style="font-size:11px;color:#555;text-align:center;padding:12px">No patches defined yet</div>';
+    return;
+  }
+  el.innerHTML = patches.map((p, i) => {
+    const color  = PATCH_COLORS[p.bc_type] || 0xffffff;
+    const hexStr = '#' + color.toString(16).padStart(6, '0');
+    const dirStr = p.direction ? ` dir:[${p.direction.map(v=>v.toFixed(1)).join(',')}]` : '';
+    const detail = `${p.bc_type} · ${p.value}${dirStr} · ${p.tri_indices.length} tris`;
+    return `
+      <div class="patch-item">
+        <div class="patch-dot" style="background:${hexStr}"></div>
+        <div class="patch-info">
+          <span class="patch-label">${p.label}</span>
+          <span class="patch-detail">${detail}</span>
+        </div>
+        <span class="patch-del" onclick="deletePatch(${i})">✕</span>
+      </div>`;
+  }).join('');
+}
+
+// ── Patch overlays on 3D model ────────────────────────────────────────────────
+function renderPatchHighlights() {
+  if (!sceneIn || !stlGeomIn) return;
+
+  patchHighlights.forEach(m => sceneIn.obj.remove(m));
+  patchHighlights = [];
+
+  const positions = stlGeomIn.attributes.position.array;
+
+  patches.forEach(patch => {
+    const newPos = [];
+    for (const ti of patch.tri_indices) {
+      for (let v = 0; v < 3; v++) {
+        const idx = ti * 3 + v;
+        newPos.push(positions[idx*3], positions[idx*3+1], positions[idx*3+2]);
+      }
+    }
+    const geo   = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(newPos, 3));
+    const color = PATCH_COLORS[patch.bc_type] || 0xffffff;
+    const mat   = new THREE.MeshBasicMaterial({
+      color, transparent: true, opacity: 0.4,
+      side: THREE.DoubleSide, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.scale.copy(sceneIn.obj.children[0].scale);
+    sceneIn.obj.add(mesh);
+    patchHighlights.push(mesh);
+  });
+}
+
+// ── Collect BCs for /optimise request ────────────────────────────────────────
+function collectBCsForRequest() {
+  if (bcMode === 'patch') {
+    return { patches, fixed_faces: [], loads: [] };
+  }
+
+  const fixedFaces = [];
+  document.querySelectorAll('.face-btn.fixed').forEach(b => fixedFaces.push(b.dataset.face));
+
+  const loads = [];
+  const lf1 = document.getElementById('load-face').value;
+  const lm1 = parseFloat(document.getElementById('load-mag').value);
+  if (lf1 && lm1 !== 0 && !isNaN(lm1)) {
+    loads.push({ face: lf1, load_type: 'force', value: lm1,
+                 direction: parseInt(document.getElementById('load-dir').value) });
+  }
+  const lf2 = document.getElementById('load-face-2').value;
+  const lm2 = parseFloat(document.getElementById('load-mag-2').value);
+  if (lf2 && lm2 !== 0 && !isNaN(lm2)) {
+    loads.push({ face: lf2, load_type: 'force', value: lm2,
+                 direction: parseInt(document.getElementById('load-dir-2').value) });
+  }
+  document.querySelectorAll('.flux-face-sel').forEach((sel, i) => {
+    const face = sel.value;
+    const val  = parseFloat(document.querySelectorAll('.flux-val')[i]?.value || 0);
+    if (face && val) loads.push({ face, load_type: 'flux', value: val, direction: 2 });
+  });
+  document.querySelectorAll('.temp-face-sel').forEach((sel, i) => {
+    const face = sel.value;
+    const val  = parseFloat(document.querySelectorAll('.temp-val')[i]?.value || 20);
+    if (face) loads.push({ face, load_type: 'temperature', value: val, direction: 2 });
+  });
+
+  return { patches: null, fixed_faces: fixedFaces, loads };
 }
 
 // ── Mechanical report render ─────────────────────────────────────────────

@@ -31,10 +31,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from gdto.mesh_material import build_problem, MaterialModel
+from gdto.mesh_material import build_problem, build_problem_dynamic, MaterialModel
 from gdto.simp import run_simp, SIMPConfig, ThermalConfig
 from gdto.reconstruct import reconstruct_stl, stl_to_base64, base64_to_stl, stl_to_voxels
 from gdto.verify import verify, THERMAL_CONSTANTS
+from gdto.bc_projection import BCProjector, SurfacePatch, flood_fill_patch
 
 
 # ---------------------------------------------------------------------------
@@ -62,6 +63,29 @@ class LoadConfig(BaseModel):
     direction:  int   = 2             # 0=X, 1=Y, 2=Z (for force only)
 
 
+class PatchRequest(BaseModel):
+    """
+    A surface patch with BC — sent from the frontend after user selection.
+    tri_indices : list of selected triangle indices into the uploaded STL
+    bc_type     : 'force' | 'pressure' | 'fixed' | 'flux' | 'temperature'
+    value       : scalar magnitude
+    direction   : [x,y,z] unit vector (force/flux) or null
+    label       : user label e.g. "bolt face"
+    """
+    tri_indices: list[int]
+    bc_type:     str         = "force"
+    value:       float       = 0.0
+    direction:   list[float] | None = None
+    label:       str         = ""
+
+
+class FloodFillRequest(BaseModel):
+    """Request to flood-fill a patch from a seed triangle."""
+    stl_b64:       str
+    seed_tri:      int
+    angle_tol_deg: float = 25.0
+
+
 class OptimiseRequest(BaseModel):
     stl_b64:         str              # base64-encoded STL
     material:        str   = "Ti64"
@@ -74,6 +98,7 @@ class OptimiseRequest(BaseModel):
     max_iter:        int   = Field(40, ge=5, le=200)
     filter_radius:   float = Field(1.5, ge=0.5, le=3.0)
     p_simp:          float = Field(3.0, ge=1.0, le=5.0)
+    patches:         list[PatchRequest] | None = None
 
 
 class VerifyRequest(BaseModel):
@@ -125,6 +150,49 @@ def _parse_loads(
     return load_face, load_magnitude, load_direction, flux_faces, temp_faces, extra_forces
 
 
+def _build_dynamic_bcs(
+    patches:    list[PatchRequest],
+    stl_verts:  np.ndarray,
+    stl_faces:  np.ndarray,
+    mesh,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert frontend patch definitions to load vectors via BCProjector.
+    Returns (f_structural, f_thermal, fixed_dofs, fixed_vals)
+    """
+    import logging
+
+    projector  = BCProjector(mesh, stl_verts, stl_faces)
+    patch_objs = []
+
+    for p in patches:
+        direction = np.array(p.direction) if p.direction else None
+        patch_objs.append(SurfacePatch(
+            tri_indices = np.array(p.tri_indices, dtype=np.int32),
+            bc_type     = p.bc_type,
+            value       = p.value,
+            direction   = direction,
+            label       = p.label,
+        ))
+
+    f_struct, f_therm, fixed_dofs, fixed_vals = projector.project_all(patch_objs)
+
+    # ── Diagnostic ──
+    logging.warning("BC projection summary:")
+    logging.warning(f"  f_struct norm:      {np.linalg.norm(f_struct):.6e}")
+    logging.warning(f"  f_struct max:       {np.abs(f_struct).max():.6e}")
+    logging.warning(f"  fixed_dofs:         {len(fixed_dofs)} DOFs")
+    logging.warning(f"  non-zero load DOFs: {np.sum(f_struct != 0)}")
+    loaded_dofs = np.where(f_struct != 0)[0]
+    overlap     = np.intersect1d(fixed_dofs, loaded_dofs)
+    logging.warning(f"  overlap (fixed ∩ loaded): {len(overlap)} DOFs")
+    if len(overlap) > 0:
+        logging.warning(f"  WARNING: {len(overlap)} force DOFs are being zeroed by fixed BC")
+    # ── End diagnostic ──
+
+    return f_struct, f_therm, fixed_dofs, fixed_vals
+
+
 def _sse(data: dict) -> str:
     """Format a dict as an SSE data line."""
     return f"data: {json.dumps(data)}\n\n"
@@ -174,22 +242,61 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
             yield _sse({"type": "status", "message": "Building FE problem..."})
             await asyncio.sleep(0)
 
-            (load_face, load_magnitude, load_direction,
-             flux_faces, temp_faces, extra_forces) = _parse_loads(req.loads)
+            if req.patches:
+                # Dynamic surface patches — arbitrary geometry BCs
+                yield _sse({"type": "status",
+                            "message": f"Projecting {len(req.patches)} BC patches..."})
+                import trimesh as _trimesh
+                stl_mesh_obj  = _trimesh.load(str(in_stl), force="mesh")
+                stl_verts_arr = np.array(stl_mesh_obj.vertices, dtype=np.float64)
+                stl_faces_arr = np.array(stl_mesh_obj.faces,    dtype=np.int32)
 
-            problem = build_problem(
-                material       = req.material,
-                nx=req.nx, ny=req.ny, nz=req.nz,
-                lx=lx, ly=ly, lz=lz,
-                fixed_faces    = req.fixed_faces,
-                load_face      = load_face,
-                load_direction = load_direction,
-                load_magnitude = load_magnitude,
-            )
+                from gdto.mesh_material import VoxelMesh
+                mesh_obj = VoxelMesh(
+                    nx=req.nx, ny=req.ny, nz=req.nz,
+                    lx=lx, ly=ly, lz=lz,
+                )
 
-            # Apply secondary loads directly to the BC load vector
-            for ef_face, ef_mag, ef_dir in extra_forces:
-                problem.bc.add_load(ef_face, ef_dir, ef_mag)
+                f_struct, f_therm, fixed_dofs, fixed_vals = _build_dynamic_bcs(
+                    req.patches, stl_verts_arr, stl_faces_arr, mesh_obj
+                )
+
+                from gdto.mesh_material import build_problem_dynamic
+                problem = build_problem_dynamic(
+                    material   = req.material,
+                    nx=req.nx, ny=req.ny, nz=req.nz,
+                    lx=lx, ly=ly, lz=lz,
+                    f_load     = f_struct,
+                    fixed_dofs = fixed_dofs,
+                )
+
+                flux_faces = {}
+                temp_faces = {}
+                thermal_cfg = ThermalConfig()
+
+            else:
+                # Legacy planar face BCs
+                (load_face, load_magnitude, load_direction,
+                 flux_faces, temp_faces, extra_forces) = _parse_loads(req.loads)
+
+                problem = build_problem(
+                    material       = req.material,
+                    nx=req.nx, ny=req.ny, nz=req.nz,
+                    lx=lx, ly=ly, lz=lz,
+                    fixed_faces    = req.fixed_faces,
+                    load_face      = load_face,
+                    load_direction = load_direction,
+                    load_magnitude = load_magnitude,
+                )
+
+                # Apply secondary loads directly to the BC load vector
+                for ef_face, ef_mag, ef_dir in extra_forces:
+                    problem.bc.add_load(ef_face, ef_dir, ef_mag)
+
+                thermal_cfg = ThermalConfig(
+                    flux_faces = flux_faces,
+                    temp_faces = temp_faces,
+                )
 
             # ── Run SIMP ─────────────────────────────────────────────
             yield _sse({"type": "status", "message": "Running topology optimisation..."})
@@ -197,16 +304,13 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
 
             cfg = SIMPConfig(
                 p               = req.p_simp,
+                p_start         = 2.0,
+                p_end           = req.p_simp,
                 max_iter        = req.max_iter,
                 tol             = 1e-3,
                 volume_fraction = req.volume_fraction,
                 filter_radius   = req.filter_radius,
                 update_scheme   = "auto",
-            )
-
-            thermal_cfg = ThermalConfig(
-                flux_faces = flux_faces,
-                temp_faces = temp_faces,
             )
 
             # Run SIMP in a thread, streaming progress events live via a queue
@@ -249,6 +353,12 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
             if exc_holder[0] is not None:
                 raise exc_holder[0]
             result = result_holder[0]
+
+            import logging
+            logging.warning(f"Compliance history: {result.compliance_history[:5]}")
+            logging.warning(f"Compliance final: {result.compliance}")
+            logging.warning(f"n_iterations: {result.n_iterations}")
+            logging.warning(f"converged: {result.converged}")
 
             # ── Geometry reconstruction ───────────────────────────────
             yield _sse({"type": "status", "message": "Reconstructing geometry..."})
@@ -359,6 +469,43 @@ async def optimise(req: OptimiseRequest):
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+@app.post("/flood_fill")
+async def flood_fill_endpoint(req: FloodFillRequest):
+    """
+    Server-side flood fill: given a seed triangle index,
+    return the indices of all triangles in the same surface patch.
+    Used by frontend after user clicks a triangle.
+    """
+    import trimesh as _trimesh
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stl_path = Path(tmpdir) / "input.stl"
+        base64_to_stl(req.stl_b64, stl_path)
+        mesh_obj  = _trimesh.load(str(stl_path), force="mesh")
+        verts     = np.array(mesh_obj.vertices, dtype=np.float64)
+        faces     = np.array(mesh_obj.faces,    dtype=np.int32)
+
+    selected = flood_fill_patch(
+        req.seed_tri, verts, faces,
+        angle_tol_deg=req.angle_tol_deg,
+    )
+
+    # Compute patch area and average normal for UI display
+    v     = verts[faces[selected]]
+    e1    = v[:, 1] - v[:, 0]
+    e2    = v[:, 2] - v[:, 0]
+    cross = np.cross(e1, e2)
+    areas = 0.5 * np.linalg.norm(cross, axis=1)
+    norms = cross / (np.linalg.norm(cross, axis=1, keepdims=True) + 1e-30)
+
+    return {
+        "tri_indices":    selected.tolist(),
+        "n_triangles":    len(selected),
+        "total_area_mm2": float(areas.sum()),
+        "avg_normal":     norms.mean(axis=0).tolist(),
+    }
 
 
 @app.post("/verify")

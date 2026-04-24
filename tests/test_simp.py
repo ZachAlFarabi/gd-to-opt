@@ -112,8 +112,43 @@ def test_change_history_length(oc_result):
     assert len(oc_result.change_history) == oc_result.n_iterations
 
 def test_compliance_decreases_overall(oc_result):
-    """Compliance at end must be lower than at start (optimisation happened)."""
-    assert oc_result.compliance_history[-1] < oc_result.compliance_history[0]
+    """
+    With p-continuation, compliance may rise during the penalisation ramp
+    then fall as topology consolidates. The correct invariant is that
+    compliance at the end is lower than the peak during optimisation,
+    and that the density field has polarised from the uniform initial state.
+
+    Monotonic decrease is only expected without continuation (fixed p).
+    """
+    history = oc_result.compliance_history
+    rho     = oc_result.rho
+
+    # The optimiser must have actually changed the density field
+    assert rho.std() > 0.01, "Density field did not polarise"
+
+    # Final compliance must be lower than the maximum seen during optimisation
+    # (the peak occurs during the p-ramp, not at the end)
+    assert history[-1] < max(history), \
+        "Final compliance must be lower than peak compliance"
+
+    # The density field should not be uniform (optimisation happened)
+    assert not np.allclose(rho, rho.mean(), atol=0.05), \
+        "Density field remained uniform — no optimisation occurred"
+
+
+def test_compliance_decreases_without_continuation():
+    """Without p-continuation (p_start == p_end), compliance decreases monotonically."""
+    prob   = build_problem(material="Ti64", nx=10, ny=10, nz=10)
+    cfg    = SIMPConfig(
+        max_iter = 20,
+        tol      = 1e-2,
+        p_start  = 3.0,   # same as p_end → no ramp
+        p_end    = 3.0,
+    )
+    result = run_simp(prob, config=cfg)
+    history = result.compliance_history
+    assert history[-1] < history[0], \
+        "Without continuation, final compliance must be lower than initial"
 
 def test_bisection_diagnostics_logged(oc_result):
     assert oc_result.bisection_iters_mean > 0

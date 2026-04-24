@@ -911,6 +911,45 @@ class BoundaryConditions:
             f" | load_mag={self.load_magnitude}"
         )
 
+    @classmethod
+    def _from_dofs(
+        cls,
+        mesh:       "VoxelMesh",
+        fixed_dofs: np.ndarray,
+        f_load:     np.ndarray,
+    ) -> "BoundaryConditions":
+        """
+        Construct BoundaryConditions directly from DOF arrays.
+        Used by build_problem_dynamic() for patch-based BCs.
+        """
+        import logging
+
+        obj = cls.__new__(cls)
+        obj.mesh        = mesh
+        obj.fixed_dofs  = np.unique(fixed_dofs.astype(np.int32))
+        obj.free_dofs   = np.setdiff1d(
+            np.arange(mesh.n_dof), obj.fixed_dofs
+        )
+        obj.f = f_load.copy()
+
+        # ── Diagnostic ──
+        logging.warning(f"_from_dofs: f norm={np.linalg.norm(f_load):.4e}, "
+                        f"fixed={len(obj.fixed_dofs)}, free={len(obj.free_dofs)}")
+        f_free_norm = np.linalg.norm(f_load[obj.free_dofs])
+        logging.warning(f"_from_dofs: f[free_dofs] norm={f_free_norm:.4e}")
+        if f_free_norm < 1e-10:
+            logging.warning("WARNING: load vector is zero on free DOFs — "
+                            "check that force and fixed patches are on different faces")
+        # ── End diagnostic ──
+
+        # Unused in dynamic BC mode but must exist for summary() / add_load()
+        obj.fixed_faces    = []
+        obj.load_face      = None
+        obj.load_direction = 2
+        obj.load_magnitude = 0.0
+
+        return obj
+
 
 # ---------------------------------------------------------------------------
 # build_problem — public API consumed by chunk 2
@@ -998,6 +1037,52 @@ def build_problem(
         load_face=load_face,
         load_direction=load_direction,
         load_magnitude=load_magnitude,
+    )
+
+    if solver not in ("direct", "cg"):
+        raise ValueError(f"solver must be 'direct' or 'cg', got '{solver}'")
+
+    return ProblemData(
+        mesh=mesh,
+        material=mat,
+        assembler=asm,
+        bc=bc,
+        solver=solver,
+    )
+
+
+def build_problem_dynamic(
+    material:   str   = "Ti64",
+    nx: int = 20, ny: int = 20, nz: int = 20,
+    lx: float = 1.0, ly: float = 1.0, lz: float = 1.0,
+    f_load:     np.ndarray | None = None,
+    fixed_dofs: np.ndarray | None = None,
+    solver:     str = "direct",
+) -> ProblemData:
+    """
+    Build a ProblemData with pre-assembled load vector and fixed DOFs.
+    Used by the dynamic BC patch system (chunk 4b) where loads come
+    from BCProjector.project_all() rather than planar face selections.
+
+    Parameters
+    ----------
+    f_load     : (n_dof,) pre-assembled structural load vector
+    fixed_dofs : (n_fixed,) DOF indices to fix at zero displacement
+    """
+    mat  = MaterialModel.from_preset(material)
+    mesh = VoxelMesh(nx=nx, ny=ny, nz=nz, lx=lx, ly=ly, lz=lz)
+    asm  = FEAssembler(mesh, mat)
+
+    if f_load is None:
+        f_load = np.zeros(mesh.n_dof)
+
+    if fixed_dofs is None:
+        fixed_dofs = np.array([], dtype=np.int32)
+
+    bc = BoundaryConditions._from_dofs(
+        mesh       = mesh,
+        fixed_dofs = fixed_dofs,
+        f_load     = f_load,
     )
 
     if solver not in ("direct", "cg"):
