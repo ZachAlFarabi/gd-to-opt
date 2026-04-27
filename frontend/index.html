@@ -792,7 +792,7 @@ function densityColor(t, color) {
   color.setRGB(0.04 + 0.60*t, 0.12 + 0.68*t, 0.35 + 0.55*t);
 }
 
-function mapFieldToSurface(fieldData, info, colorFn) {
+function mapFieldToSurface(fieldData, info, colorFn, usePercentile = true) {
   if (!stlGeomRef || !fieldData || !info) return null;
 
   const {nx, ny, nz, lx_m, ly_m, lz_m} = info;
@@ -815,10 +815,14 @@ function mapFieldToSurface(fieldData, info, colorFn) {
   const finite = Array.from(fieldData).filter(v => isFinite(v) && v > 0);
   finite.sort((a, b) => a - b);
 
-  const p_lo = 0.02;
-  const p_hi = 0.98;
-  const fMin  = finite.length > 0 ? finite[Math.floor(p_lo * finite.length)] : 0;
-  const fMax  = finite.length > 0 ? finite[Math.floor(p_hi * finite.length)] : 1;
+  let fMin, fMax;
+  if (usePercentile && finite.length > 0) {
+    fMin = finite[Math.floor(0.02 * finite.length)];
+    fMax = finite[Math.floor(0.98 * finite.length)];
+  } else {
+    fMin = finite.length > 0 ? finite[0]                   : 0;
+    fMax = finite.length > 0 ? finite[finite.length - 1]   : 1;
+  }
   const fRange = (fMax - fMin) < 1e-10 ? 1.0 : (fMax - fMin);
 
   // Solid-aware trilinear interpolation (row-major: i*ny*nz + j*nz + k)
@@ -926,7 +930,7 @@ function setViewMode(mode) {
       log('Stress field is zero — no load applied');
       return;
     }
-    const rng = mapFieldToSurface(stressData, domainInfo, feaColor);
+    const rng = mapFieldToSurface(stressData, domainInfo, feaColor, true);
     activateVertexColors();
     if (rng) showColorbar(rng.min.toFixed(4), rng.max.toFixed(4), 'MPa  (2–98th pct)');
     return;
@@ -934,9 +938,9 @@ function setViewMode(mode) {
 
   if (mode === 'thermal') {
     if (!thermalData || !domainInfo) { log('No thermal data'); return; }
-    const rng = mapFieldToSurface(thermalData, domainInfo, feaColor);
+    const rng = mapFieldToSurface(thermalData, domainInfo, feaColor, false);
     activateVertexColors();
-    if (rng) showColorbar(rng.min.toFixed(4), rng.max.toFixed(4), '°C  (2–98th pct)');
+    if (rng) showColorbar(rng.min.toFixed(1), rng.max.toFixed(1), '°C  (full range)');
     return;
   }
 }
@@ -1489,7 +1493,7 @@ function renderReport(r) {
   const rows = [
     ['Compliance (SIMP)',  parseFloat(r.compliance_simp_Nm).toExponential(3) + ' N·m'],
     ['Compliance (real)',  parseFloat(r.compliance_real_Nm).toExponential(3) + ' N·m'],
-    ['Gap ratio',          parseFloat(r.gap_ratio_pct ?? 0).toFixed(1) + ' %'],
+    ['SIMP accuracy',      parseFloat(r.gap_ratio_pct ?? 0).toFixed(1) + ' %  (+ = conservative)'],
     ['Mass',               parseFloat(r.mass_kg).toFixed(3) + ' kg'],
     ['Volume fraction',    parseFloat(r.volume_fraction).toFixed(3)],
     [r.stress_label ?? 'Max von Mises', parseFloat(r.max_von_mises_mpa).toFixed(1) + ' MPa'],
