@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GD-TO — Pareto Front Visualiser</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #0a0c0f; color: #d4dbe8;
+  min-height: 100vh; padding: 2rem;
+}
+h1 { font-size: 20px; font-weight: 500; color: #fff; margin-bottom: 4px; }
+.subtitle { font-size: 13px; color: #5a6478; margin-bottom: 1.5rem; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+.metric {
+  background: #181c24; border-radius: 8px; padding: 12px 16px;
+}
+.metric-label { font-size: 12px; color: #5a6478; margin-bottom: 4px; }
+.metric-val { font-size: 24px; font-weight: 500; color: #fff; }
+.controls {
+  display: flex; gap: 10px; align-items: center; margin-bottom: 12px;
+  font-size: 12px; color: #5a6478; flex-wrap: wrap;
+}
+select {
+  font-size: 12px; background: #181c24; border: 1px solid #2a2a38;
+  color: #d4dbe8; border-radius: 5px; padding: 4px 8px;
+}
+button {
+  font-size: 12px; padding: 5px 14px; border-radius: 5px;
+  border: 1px solid #2a2a38; background: #181c24;
+  color: #d4dbe8; cursor: pointer; transition: all .15s;
+}
+button:hover { border-color: #4080c0; color: #80b4ff; }
+.legend {
+  display: flex; gap: 16px; margin-bottom: 8px;
+  font-size: 11px; color: #5a6478; align-items: center; flex-wrap: wrap;
+}
+.dot {
+  width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+}
+.gen-label { margin-left: auto; font-weight: 500; color: #d4dbe8; font-size: 12px; }
+.chart-wrap { position: relative; width: 100%; height: 320px; margin-bottom: 16px; }
+.hv-wrap { position: relative; width: 100%; height: 100px; }
+.sol-detail {
+  margin-top: 12px; padding-top: 10px;
+  border-top: 1px solid #1e2430;
+  font-size: 12px; color: #5a6478;
+}
+.sol-detail strong { color: #d4dbe8; }
+.section-label {
+  font-size: 11px; color: #5a6478; margin-bottom: 6px; margin-top: 14px;
+  text-transform: uppercase; letter-spacing: .06em;
+}
+</style>
+</head>
+<body>
+
+<h1>GD-TO — Pareto Front Visualiser</h1>
+<p class="subtitle">Simulates NSGA-II evolution over 5 generations × 40 individuals. Press Run to animate.</p>
+
+<div class="grid-2">
+  <div class="metric">
+    <div class="metric-label">Pareto solutions</div>
+    <div class="metric-val" id="n-pareto">0</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">Evaluations</div>
+    <div class="metric-val" id="n-eval">0 / 200</div>
+  </div>
+</div>
+
+<div class="controls">
+  <span>X axis</span>
+  <select id="x-sel" onchange="redraw()">
+    <option value="0" selected>Compliance (N·m)</option>
+    <option value="1">Mass (kg)</option>
+    <option value="2">Support vol (m³)</option>
+  </select>
+  <span>Y axis</span>
+  <select id="y-sel" onchange="redraw()">
+    <option value="0">Compliance (N·m)</option>
+    <option value="1" selected>Mass (kg)</option>
+    <option value="2">Support vol (m³)</option>
+  </select>
+  <button onclick="togglePlay()" id="play-btn" style="margin-left:auto">▶ Run</button>
+  <button onclick="reset()">↺ Reset</button>
+</div>
+
+<div class="legend">
+  <span><span class="dot" style="background:#5a6478;opacity:.6"></span> evaluated</span>
+  <span><span class="dot" style="background:#1D9E75"></span> Pareto front</span>
+  <span class="gen-label" id="gen-label">Generation 0 / 5</span>
+</div>
+
+<div class="chart-wrap">
+  <canvas id="chart" role="img"
+    aria-label="Scatter plot of NSGA-II evaluations showing Pareto front convergence">
+    Pareto front scatter plot — compliance vs mass tradeoff across evaluated designs.
+  </canvas>
+</div>
+
+<div class="section-label">Hypervolume convergence</div>
+<div class="hv-wrap">
+  <canvas id="hv-chart" role="img"
+    aria-label="Hypervolume indicator per generation — increases as Pareto front converges">
+    Hypervolume per generation.
+  </canvas>
+</div>
+
+<div class="sol-detail" id="sol-detail">Click a teal Pareto point to inspect its design parameters.</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const POP = 40, N_GEN = 5;
+const OBJ_NAMES = ['Compliance (N·m)', 'Mass (kg)', 'Support vol (m³)'];
+const refPt = [0.9, 1.0, 0.01];
+
+let allPts = [], playing = false, interval = null, currentGen = 0;
+let scatter, hvChart;
+
+function genSol(gen) {
+  const vf = 0.1 + Math.random() * 0.8;
+  const ow = Math.random();
+  const c  = (0.8 - vf * 0.6) * (1 + 0.3 * Math.random()) * Math.exp(-gen * 0.08);
+  const m  = vf * 0.95 * (1 + 0.1 * Math.random());
+  const vs = (1 - vf) * 0.003 * (1 + ow * 2) * (1 + 0.2 * Math.random());
+  return { vf, ow, c: Math.max(c,1e-4), m: Math.max(m,0.05), vs: Math.max(vs,1e-5), gen, isPareto: false };
+}
+
+function computePareto(pts) {
+  pts.forEach(p => p.isPareto = false);
+  pts.forEach((p, i) => {
+    p.isPareto = !pts.some((q, j) => i !== j &&
+      q.c <= p.c && q.m <= p.m && q.vs <= p.vs &&
+      (q.c < p.c || q.m < p.m || q.vs < p.vs));
+  });
+}
+
+function hypervolume(pts) {
+  const front = pts.filter(p => p.isPareto)
+    .map(p => [p.c / refPt[0], p.m / refPt[1]])
+    .sort((a, b) => a[0] - b[0]);
+  if (!front.length) return 0;
+  let hv = 0, prevY = 1.0;
+  for (const [x, y] of front) {
+    const ey = Math.min(y, prevY);
+    hv += (1.0 - x) * (prevY - ey);
+    prevY = ey;
+  }
+  return Math.max(0, hv);
+}
+
+function initCharts() {
+  scatter = new Chart(document.getElementById('chart').getContext('2d'), {
+    type: 'scatter',
+    data: { datasets: [
+      { label: 'Evaluated', data: [],
+        backgroundColor: 'rgba(90,100,120,0.35)', pointRadius: 4, pointHoverRadius: 6 },
+      { label: 'Pareto front', data: [],
+        backgroundColor: '#1D9E75', pointRadius: 7, pointHoverRadius: 10 },
+    ]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => {
+          if (ctx.datasetIndex !== 1) return [];
+          const p = allPts.filter(p => p.isPareto)[ctx.dataIndex];
+          if (!p) return [];
+          return [
+            `C: ${p.c.toExponential(2)} N·m`,
+            `m: ${p.m.toFixed(3)} kg`,
+            `Vf: ${(p.vf*100).toFixed(0)}%  ow: ${p.ow.toFixed(2)}`,
+          ];
+        }}}
+      },
+      scales: {
+        x: { ticks:{color:'#5a6478',font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'},
+             title:{display:true,color:'#5a6478',font:{size:11},text:'Compliance (N·m)'} },
+        y: { ticks:{color:'#5a6478',font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'},
+             title:{display:true,color:'#5a6478',font:{size:11},text:'Mass (kg)'} },
+      },
+      onClick: (e, els) => {
+        if (!els.length || els[0].datasetIndex !== 1) return;
+        const p = allPts.filter(p => p.isPareto)[els[0].dataIndex];
+        if (!p) return;
+        document.getElementById('sol-detail').innerHTML =
+          `<strong>Pareto solution</strong> · gen ${p.gen+1} · ` +
+          `Vf = ${(p.vf*100).toFixed(1)}% · ow = ${p.ow.toFixed(2)} · ` +
+          `C = ${p.c.toExponential(2)} N·m · m = ${p.m.toFixed(3)} kg · ` +
+          `Vs = ${p.vs.toExponential(2)} m³`;
+      }
+    }
+  });
+
+  hvChart = new Chart(document.getElementById('hv-chart').getContext('2d'), {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      data: [], borderColor: '#1D9E75',
+      backgroundColor: 'rgba(29,158,117,0.15)',
+      pointRadius: 4, borderWidth: 2, tension: 0.3, fill: true,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks:{color:'#5a6478',font:{size:10}}, grid:{color:'rgba(255,255,255,.05)'},
+             title:{display:true,color:'#5a6478',font:{size:10},text:'Generation'} },
+        y: { ticks:{color:'#5a6478',font:{size:10},callback:v=>v.toFixed(3)},
+             grid:{color:'rgba(255,255,255,.05)'},
+             title:{display:true,color:'#5a6478',font:{size:10},text:'HV indicator'} },
+      }
+    }
+  });
+}
+
+function redraw() {
+  const xi = parseInt(document.getElementById('x-sel').value);
+  const yi = parseInt(document.getElementById('y-sel').value);
+  const vx = p => [p.c, p.m, p.vs][xi];
+  const vy = p => [p.c, p.m, p.vs][yi];
+  scatter.data.datasets[0].data = allPts.filter(p => !p.isPareto).map(p => ({x:vx(p), y:vy(p)}));
+  scatter.data.datasets[1].data = allPts.filter(p =>  p.isPareto).map(p => ({x:vx(p), y:vy(p)}));
+  scatter.options.scales.x.title.text = OBJ_NAMES[xi];
+  scatter.options.scales.y.title.text = OBJ_NAMES[yi];
+  scatter.update('none');
+  document.getElementById('n-pareto').textContent = allPts.filter(p => p.isPareto).length;
+  document.getElementById('n-eval').textContent   = allPts.length + ' / ' + (POP * N_GEN);
+  document.getElementById('gen-label').textContent = 'Generation ' + currentGen + ' / ' + N_GEN;
+}
+
+function runGeneration() {
+  if (currentGen >= N_GEN) { stopPlay(); return; }
+  allPts = allPts.concat(Array.from({length: POP}, () => genSol(currentGen)));
+  computePareto(allPts);
+  currentGen++;
+  hvChart.data.labels.push('Gen ' + currentGen);
+  hvChart.data.datasets[0].data.push(parseFloat(hypervolume(allPts).toFixed(4)));
+  hvChart.update('none');
+  redraw();
+}
+
+function togglePlay() {
+  if (playing) { stopPlay(); return; }
+  if (currentGen >= N_GEN) reset();
+  playing = true;
+  document.getElementById('play-btn').textContent = '⏸ Pause';
+  interval = setInterval(() => { runGeneration(); if (currentGen >= N_GEN) stopPlay(); }, 650);
+}
+
+function stopPlay() {
+  playing = false; clearInterval(interval);
+  document.getElementById('play-btn').textContent = currentGen >= N_GEN ? '✓ Done' : '▶ Run';
+}
+
+function reset() {
+  stopPlay();
+  allPts = []; currentGen = 0;
+  scatter.data.datasets[0].data = [];
+  scatter.data.datasets[1].data = [];
+  scatter.update('none');
+  hvChart.data.labels = [];
+  hvChart.data.datasets[0].data = [];
+  hvChart.update('none');
+  document.getElementById('n-pareto').textContent = '0';
+  document.getElementById('n-eval').textContent   = '0 / 200';
+  document.getElementById('gen-label').textContent = 'Generation 0 / 5';
+  document.getElementById('sol-detail').textContent = 'Click a teal Pareto point to inspect its design parameters.';
+  document.getElementById('play-btn').textContent = '▶ Run';
+}
+
+initCharts();
+</script>
+</body>
+</html>
