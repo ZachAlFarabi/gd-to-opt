@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from gdto.mesh_material import build_problem, build_problem_dynamic, MaterialModel
 from gdto.simp import run_simp, SIMPConfig, ThermalConfig
 from gdto.reconstruct import reconstruct_stl, stl_to_base64, base64_to_stl, stl_to_voxels
+from gdto.gd_loop import run_gd, GDConfig, GDResult
 from gdto.verify import verify, THERMAL_CONSTANTS
 from gdto.bc_projection import BCProjector, SurfacePatch, flood_fill_patch
 
@@ -109,6 +110,32 @@ class VerifyRequest(BaseModel):
     nz:            int   = 20
     fixed_faces:   list[str] = ["zmin"]
     loads:         list[LoadConfig] = []
+
+
+class GDRequest(BaseModel):
+    """Request body for /gd_optimise endpoint."""
+    stl_b64:         str
+    material:        str   = "Ti64"
+    nx:              int   = Field(20, ge=4, le=40)
+    ny:              int   = Field(20, ge=4, le=40)
+    nz:              int   = Field(20, ge=4, le=40)
+    pop_size:        int   = Field(40, ge=4, le=200)
+    n_gen:           int   = Field(5,  ge=1, le=20)
+    simp_iter:       int   = Field(40, ge=5, le=150)
+    fixed_faces:     list[str] = ["zmin"]
+    loads:           list[LoadConfig] = []
+
+
+class ReconstructRequest(BaseModel):
+    """Request to reconstruct STL for one Pareto solution."""
+    stl_b64:         str        # original input STL (for voxelisation)
+    design_params:   dict       # volume_fraction, overhang_weight, etc.
+    material:        str  = "Ti64"
+    nx:              int  = 20
+    ny:              int  = 20
+    nz:              int  = 20
+    fixed_faces:     list[str] = ["zmin"]
+    loads:           list[LoadConfig] = []
 
 
 # ---------------------------------------------------------------------------
@@ -434,6 +461,98 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
 
 
 # ---------------------------------------------------------------------------
+# SSE generator for /gd_optimise
+# ---------------------------------------------------------------------------
+
+async def _gd_stream(req: GDRequest) -> AsyncGenerator[str, None]:
+    """
+    Run full NSGA-II GD loop and stream SSE events.
+
+    Events:
+        {type: "status",      message: str}
+        {type: "domain",      info: dict}
+        {type: "gd_progress", n_gen: int, n_eval: int, n_pareto: int, wall_time: float}
+        {type: "done",        pareto: dict}
+        {type: "error",       message: str, trace: str}
+    """
+    try:
+        yield _sse({"type": "status", "message": "Decoding STL..."})
+        await asyncio.sleep(0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_stl = Path(tmpdir) / "input.stl"
+            base64_to_stl(req.stl_b64, in_stl)
+
+            yield _sse({"type": "status", "message": "Voxelising design domain..."})
+            await asyncio.sleep(0)
+
+            rho_init, domain_info = stl_to_voxels(
+                in_stl, nx=req.nx, ny=req.ny, nz=req.nz
+            )
+            lx = domain_info["lx_m"]
+            ly = domain_info["ly_m"]
+            lz = domain_info["lz_m"]
+
+            yield _sse({"type": "domain", "info": domain_info})
+            await asyncio.sleep(0)
+
+            (load_face, load_magnitude, load_direction,
+             flux_faces, temp_faces, _extra) = _parse_loads(req.loads)
+
+            gd_cfg = GDConfig(
+                pop_size    = req.pop_size,
+                n_gen       = req.n_gen,
+                simp_iter   = req.simp_iter,
+                simp_tol    = 1e-2,
+                mesh_nx     = req.nx,
+                mesh_ny     = req.ny,
+                mesh_nz     = req.nz,
+                material    = req.material,
+                fixed_faces = req.fixed_faces,
+                load_face   = load_face,
+                load_dir    = load_direction,
+                load_mag    = load_magnitude,
+                lx=lx, ly=ly, lz=lz,
+                flux_faces  = flux_faces,
+                temp_faces  = temp_faces,
+            )
+
+            yield _sse({
+                "type":    "status",
+                "message": f"Starting NSGA-II: pop={req.pop_size}, gen={req.n_gen}, "
+                           f"workers={gd_cfg.n_workers}",
+            })
+            await asyncio.sleep(0)
+
+            yield _sse({"type": "status", "message": "Running NSGA-II..."})
+            await asyncio.sleep(0)
+
+            loop = asyncio.get_event_loop()
+            gd_result: GDResult = await loop.run_in_executor(
+                None, lambda: run_gd(gd_cfg, progress_callback=None)
+            )
+
+            yield _sse({
+                "type":      "gd_progress",
+                "n_gen":     gd_result.n_generations,
+                "n_eval":    gd_result.n_evaluations,
+                "n_pareto":  len(gd_result.pareto_solutions),
+                "wall_time": round(gd_result.wall_time_s, 1),
+            })
+
+            yield _sse({"type": "status", "message": "Pareto front complete. Sending results..."})
+            await asyncio.sleep(0)
+
+            yield _sse({
+                "type":   "done",
+                "pareto": gd_result.to_dict(),
+            })
+
+    except Exception as e:
+        yield _sse({"type": "error", "message": str(e), "trace": traceback.format_exc()})
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 
@@ -547,3 +666,78 @@ async def verify_endpoint(req: VerifyRequest):
         )
         result = verify(dummy, problem, flux_faces=flux_faces, temp_faces=temp_faces)
         return result.report
+
+
+@app.post("/gd_optimise")
+async def gd_optimise(req: GDRequest):
+    """Run full NSGA-II generative design loop with SSE streaming."""
+    return StreamingResponse(
+        _gd_stream(req),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.post("/reconstruct_solution")
+async def reconstruct_solution(req: ReconstructRequest):
+    """
+    Reconstruct and return the STL for one Pareto solution on demand.
+    Called when user clicks a point in the Pareto scatter plot.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        in_stl  = Path(tmpdir) / "input.stl"
+        out_stl = Path(tmpdir) / "solution.stl"
+        base64_to_stl(req.stl_b64, in_stl)
+
+        rho_init, domain_info = stl_to_voxels(
+            in_stl, nx=req.nx, ny=req.ny, nz=req.nz,
+            volume_fraction=req.design_params.get("volume_fraction", 0.4),
+        )
+        lx = domain_info["lx_m"]
+        ly = domain_info["ly_m"]
+        lz = domain_info["lz_m"]
+
+        (load_face, load_magnitude, load_direction,
+         flux_faces, temp_faces, _extra) = _parse_loads(req.loads)
+
+        problem = build_problem(
+            material       = req.material,
+            nx=req.nx, ny=req.ny, nz=req.nz,
+            lx=lx, ly=ly, lz=lz,
+            fixed_faces    = req.fixed_faces,
+            load_face      = load_face,
+            load_direction = load_direction,
+            load_magnitude = load_magnitude,
+        )
+
+        cfg = SIMPConfig(
+            max_iter        = 80,
+            tol             = 1e-3,
+            volume_fraction = req.design_params.get("volume_fraction", 0.4),
+            filter_radius   = req.design_params.get("min_feature_size", 1.5),
+            update_scheme   = "auto",
+            p_start         = 2.0,
+            p_end           = 3.0,
+        )
+
+        thermal_cfg = ThermalConfig(flux_faces=flux_faces, temp_faces=temp_faces)
+
+        result = run_simp(
+            problem, config=cfg, thermal_cfg=thermal_cfg,
+            design_params=req.design_params,
+        )
+
+        stl_info = reconstruct_stl(result.rho, problem.mesh, out_stl)
+        stl_b64  = stl_to_base64(out_stl)
+
+        return {
+            "stl_b64":           stl_b64,
+            "stl_info":          stl_info,
+            "compliance_Nm":     result.compliance,
+            "mass_kg":           result.mass,
+            "support_volume_m3": result.support_volume,
+        }

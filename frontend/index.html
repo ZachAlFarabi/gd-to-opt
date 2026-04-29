@@ -200,6 +200,65 @@
 
   /* ── Select mode cursor ── */
   .viewer.select-mode canvas { cursor: crosshair !important; }
+
+  /* ── Run mode toggle ── */
+  .run-mode-toggle { display:flex; gap:4px; margin-bottom:12px; }
+  .run-mode-btn {
+    flex:1; padding:6px 8px; font-size:11px; font-weight:600;
+    border-radius:6px; border:1px solid #2a2a38;
+    background:#1a1a24; color:#666; cursor:pointer; text-align:center;
+  }
+  .run-mode-btn.active { background:#1e3a5f; border-color:#4080c0; color:#80b4ff; }
+
+  /* ── GD config panel ── */
+  .gd-config { display:none; }
+  .gd-config.visible { display:block; }
+
+  /* ── Pareto panel ── */
+  .pareto-panel {
+    border-top: 1px solid #2a2a38;
+    padding: 12px 16px;
+  }
+  .pareto-header {
+    display:flex; justify-content:space-between; align-items:center;
+    margin-bottom:8px;
+  }
+  .pareto-count {
+    font-family: monospace;
+    font-size:11px; color:#00d4aa;
+  }
+  .pareto-axis-sel {
+    display:flex; gap:6px; margin-bottom:10px; font-size:11px; color:#888; align-items:center;
+  }
+  .pareto-axis-sel select {
+    padding:3px 6px; font-size:11px; background:#1e1e2a;
+    border:1px solid #2a2a38; border-radius:4px; color:#e0e0e8;
+  }
+
+  /* ── Solution list ── */
+  .solution-list { max-height:180px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; margin-top:8px; }
+  .solution-item {
+    background:#1e1e2a; border:1px solid #2a2a38; border-radius:5px;
+    padding:6px 10px; font-size:11px; cursor:pointer; display:flex;
+    justify-content:space-between; align-items:center;
+    transition: border-color .15s;
+  }
+  .solution-item:hover { border-color:#4080c0; }
+  .solution-item.selected { border-color:#00d4aa; background:#0a1a14; }
+  .sol-id { font-family:monospace; color:#555; font-size:10px; }
+  .sol-objs { display:flex; gap:8px; }
+  .sol-obj { text-align:right; }
+  .sol-obj-val { font-weight:600; color:#c8d3e8; }
+  .sol-obj-lbl { color:#555; }
+  .sol-load-btn {
+    padding:2px 8px; font-size:10px; border-radius:4px;
+    border:1px solid #4080c0; background:transparent; color:#80b4ff;
+    cursor:pointer;
+  }
+  .sol-load-btn:hover { background:#1e3a5f; }
+
+  /* ── Generation progress ── */
+  .gen-progress { font-size:11px; color:#555; margin-top:6px; }
 </style>
 </head>
 <body>
@@ -419,6 +478,33 @@
       </div>
     </div>
 
+    <div class="section" id="run-mode-section">
+      <div class="run-mode-toggle">
+        <button class="run-mode-btn active" id="btn-single-run"
+                onclick="setRunMode('single')">Single run</button>
+        <button class="run-mode-btn" id="btn-gd-run"
+                onclick="setRunMode('gd')">Generative design</button>
+      </div>
+
+      <!-- GD config (hidden in single mode) -->
+      <div class="gd-config" id="gd-config-panel">
+        <div class="grid-2" style="margin-bottom:8px">
+          <div>
+            <label>Population</label>
+            <input type="number" id="gd-pop" value="40" min="4" max="200">
+          </div>
+          <div>
+            <label>Generations</label>
+            <input type="number" id="gd-gen" value="5" min="1" max="20">
+          </div>
+        </div>
+        <div style="font-size:11px;color:#555;margin-bottom:8px">
+          Est. evaluations: <span id="gd-eval-est">200</span> ·
+          Est. time: <span id="gd-time-est">~20 min</span>
+        </div>
+      </div>
+    </div>
+
     <div class="section">
       <button class="btn btn-primary" id="run-btn" onclick="runOptimise()" disabled>
         Run optimisation
@@ -494,6 +580,33 @@
       <div class="info-bar" id="info-out" style="display:none"></div>
     </div>
     <div id="report-container"></div>
+
+    <!-- Pareto front panel (shown after GD run) -->
+    <div class="pareto-panel" id="pareto-panel" style="display:none">
+      <div class="pareto-header">
+        <span style="font-size:12px;font-weight:600;color:#e4eaf5">Pareto Front</span>
+        <span class="pareto-count" id="pareto-count">0 solutions</span>
+      </div>
+
+      <div class="pareto-axis-sel">
+        <span>X</span>
+        <select id="pareto-x-axis" onchange="updateParetoChart()">
+          <option value="0" selected>Compliance</option>
+          <option value="1">Mass</option>
+          <option value="2">Support volume</option>
+        </select>
+        <span>Y</span>
+        <select id="pareto-y-axis" onchange="updateParetoChart()">
+          <option value="0">Compliance</option>
+          <option value="1" selected>Mass</option>
+          <option value="2">Support volume</option>
+        </select>
+      </div>
+
+      <canvas id="pareto-chart" height="160"></canvas>
+      <div class="gen-progress" id="gen-progress"></div>
+      <div class="solution-list" id="solution-list"></div>
+    </div>
   </div>
 
 </div>
@@ -508,6 +621,12 @@ const API = 'http://localhost:8000';
 let inputSTLb64 = null;
 let complianceChart = null;
 let sceneIn = null, sceneOut = null;
+
+// ── GD state ─────────────────────────────────────────────────────────────
+let runMode       = 'single';
+let paretoData    = [];
+let paretoChart   = null;
+let selectedSolId = null;
 
 // ── Server health check ──────────────────────────────────────────────────
 async function checkHealth() {
@@ -1054,6 +1173,7 @@ function log(msg) {
 // ── Run optimisation ─────────────────────────────────────────────────────
 async function runOptimise() {
   if (!inputSTLb64) return;
+  if (runMode === 'gd') { runGDOptimise(); return; }
 
   document.getElementById('run-btn').disabled = true;
   document.getElementById('log').innerHTML = '';
@@ -1482,6 +1602,252 @@ function collectBCsForRequest() {
   });
 
   return { patches: null, fixed_faces: fixedFaces, loads };
+}
+
+// ── GD run mode switching ─────────────────────────────────────────────────
+function setRunMode(mode) {
+  runMode = mode;
+  document.getElementById('btn-single-run').classList.toggle('active', mode === 'single');
+  document.getElementById('btn-gd-run').classList.toggle('active',     mode === 'gd');
+  document.getElementById('gd-config-panel').classList.toggle('visible', mode === 'gd');
+  updateGDEstimate();
+}
+
+function updateGDEstimate() {
+  const pop  = parseInt(document.getElementById('gd-pop')?.value || 40);
+  const gen  = parseInt(document.getElementById('gd-gen')?.value || 5);
+  const evals = pop * gen;
+  const mins  = Math.round(evals * 45 / 60 / 8);   // 45s/eval, 8 cores
+  document.getElementById('gd-eval-est').textContent = evals;
+  document.getElementById('gd-time-est').textContent = `~${mins} min`;
+}
+
+document.getElementById('gd-pop')?.addEventListener('input', updateGDEstimate);
+document.getElementById('gd-gen')?.addEventListener('input', updateGDEstimate);
+updateGDEstimate();
+
+// ── GD run ────────────────────────────────────────────────────────────────
+async function runGDOptimise() {
+  if (!inputSTLb64) return;
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('log').innerHTML = '';
+  paretoData = [];
+  document.getElementById('pareto-panel').style.display = 'block';
+  document.getElementById('pareto-count').textContent = '0 solutions';
+  document.getElementById('solution-list').innerHTML = '';
+  document.getElementById('gen-progress').textContent = '';
+  initParetoChart();
+
+  const bcData = collectBCsForRequest();
+  const body = {
+    stl_b64:     inputSTLb64,
+    material:    document.getElementById('material').value,
+    nx:          parseInt(document.getElementById('nx').value),
+    ny:          parseInt(document.getElementById('ny').value),
+    nz:          parseInt(document.getElementById('nz').value),
+    pop_size:    parseInt(document.getElementById('gd-pop').value),
+    n_gen:       parseInt(document.getElementById('gd-gen').value),
+    simp_iter:   parseInt(document.getElementById('max-iter').value),
+    fixed_faces: bcData.fixed_faces,
+    loads:       bcData.loads,
+  };
+
+  log(`Starting GD: pop=${body.pop_size}, gen=${body.n_gen}, ` +
+      `est. ${body.pop_size * body.n_gen} evaluations`);
+
+  try {
+    const res    = await fetch(`${API}/gd_optimise`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const reader = res.body.getReader();
+    const dec    = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try { handleGDEvent(JSON.parse(line.slice(6))); } catch {}
+      }
+    }
+  } catch (err) { log('GD Error: ' + err.message); }
+  document.getElementById('run-btn').disabled = false;
+}
+
+// ── GD event handler ──────────────────────────────────────────────────────
+function handleGDEvent(ev) {
+  if (ev.type === 'status') {
+    log(ev.message);
+  } else if (ev.type === 'domain') {
+    const d = ev.info;
+    log(`Domain: ${(d.lx_m*1000).toFixed(1)}×${(d.ly_m*1000).toFixed(1)}×${(d.lz_m*1000).toFixed(1)} mm`);
+  } else if (ev.type === 'gd_progress') {
+    document.getElementById('gen-progress').textContent =
+      `Gen ${ev.n_gen} complete · ${ev.n_eval} evaluations · ${ev.n_pareto} Pareto solutions · ${ev.wall_time}s`;
+    log(`GD complete: ${ev.n_pareto} Pareto solutions, ${ev.n_eval} evaluations, ${ev.wall_time}s`);
+  } else if (ev.type === 'done') {
+    paretoData = (ev.pareto.solutions || []);
+    document.getElementById('pareto-count').textContent = `${paretoData.length} solutions`;
+    updateParetoChart();
+    renderSolutionList();
+    log(`Pareto front: ${paretoData.length} non-dominated solutions`);
+  } else if (ev.type === 'error') {
+    log('ERROR: ' + ev.message);
+    console.error(ev.trace);
+  }
+}
+
+// ── Pareto chart ──────────────────────────────────────────────────────────
+function initParetoChart() {
+  const ctx = document.getElementById('pareto-chart').getContext('2d');
+  if (paretoChart) { paretoChart.destroy(); paretoChart = null; }
+  paretoChart = new Chart(ctx, {
+    type: 'scatter',
+    data: { datasets: [{
+      label: 'Pareto front',
+      data:  [],
+      backgroundColor: '#00d4aa',
+      borderColor:     '#00d4aa',
+      pointRadius:     6,
+      pointHoverRadius: 9,
+    }]},
+    options: {
+      animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const s = paretoData[ctx.dataIndex];
+              if (!s) return '';
+              return [
+                `C: ${s.compliance_Nm?.toExponential(2)} N·m`,
+                `m: ${s.mass_kg?.toFixed(3)} kg`,
+                `Vf: ${s.volume_fraction?.toFixed(2)}`,
+              ];
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks:{color:'#555',font:{size:10}}, grid:{color:'#1a1a24'},
+             title:{display:true,color:'#666',font:{size:10}} },
+        y: { ticks:{color:'#555',font:{size:10}}, grid:{color:'#1a1a24'},
+             title:{display:true,color:'#666',font:{size:10}} },
+      },
+      onClick: (e, elements) => {
+        if (elements.length > 0) selectSolution(elements[0].index);
+      }
+    }
+  });
+}
+
+function updateParetoChart() {
+  if (!paretoChart || !paretoData.length) return;
+  const xi = parseInt(document.getElementById('pareto-x-axis')?.value || 0);
+  const yi = parseInt(document.getElementById('pareto-y-axis')?.value || 1);
+  const keys   = ['compliance_Nm', 'mass_kg', 'support_volume_m3'];
+  const labels = ['Compliance (N·m)', 'Mass (kg)', 'Support vol (m³)'];
+
+  paretoChart.data.datasets[0].data = paretoData.map(s => ({
+    x: s[keys[xi]], y: s[keys[yi]]
+  }));
+  paretoChart.options.scales.x.title.text = labels[xi];
+  paretoChart.options.scales.y.title.text = labels[yi];
+  paretoChart.update('none');
+}
+
+// ── Solution list ─────────────────────────────────────────────────────────
+function renderSolutionList() {
+  const el = document.getElementById('solution-list');
+  el.innerHTML = paretoData.map((s, i) => `
+    <div class="solution-item ${selectedSolId === i ? 'selected' : ''}"
+         onclick="selectSolution(${i})">
+      <span class="sol-id">#${i}</span>
+      <div class="sol-objs">
+        <div class="sol-obj">
+          <div class="sol-obj-val">${s.compliance_Nm?.toExponential(2)}</div>
+          <div class="sol-obj-lbl">N·m</div>
+        </div>
+        <div class="sol-obj">
+          <div class="sol-obj-val">${s.mass_kg?.toFixed(3)}</div>
+          <div class="sol-obj-lbl">kg</div>
+        </div>
+        <div class="sol-obj">
+          <div class="sol-obj-val">${(s.volume_fraction * 100).toFixed(0)}%</div>
+          <div class="sol-obj-lbl">Vf</div>
+        </div>
+      </div>
+      <button class="sol-load-btn" onclick="event.stopPropagation();loadSolution(${i})">
+        Load STL
+      </button>
+    </div>`).join('');
+}
+
+function selectSolution(idx) {
+  selectedSolId = idx;
+  renderSolutionList();
+  if (paretoChart) {
+    paretoChart.data.datasets[0].backgroundColor =
+      paretoData.map((_, i) => i === idx ? '#ff8800' : '#00d4aa');
+    paretoChart.update('none');
+  }
+  const s = paretoData[idx];
+  if (s) log(`Selected solution #${idx}: C=${s.compliance_Nm?.toExponential(2)}, m=${s.mass_kg?.toFixed(3)}kg, Vf=${s.volume_fraction?.toFixed(2)}`);
+}
+
+async function loadSolution(idx) {
+  const s = paretoData[idx];
+  if (!s || !inputSTLb64) return;
+  log(`Loading STL for solution #${idx}...`);
+  document.getElementById('run-btn').disabled = true;
+
+  const bcData = collectBCsForRequest();
+  const body = {
+    stl_b64:      inputSTLb64,
+    design_params: {
+      volume_fraction:       s.volume_fraction,
+      overhang_weight:       s.overhang_weight,
+      build_orientation_deg: s.build_orientation_deg,
+      min_feature_size:      s.min_feature_size,
+    },
+    material:    document.getElementById('material').value,
+    nx:          parseInt(document.getElementById('nx').value),
+    ny:          parseInt(document.getElementById('ny').value),
+    nz:          parseInt(document.getElementById('nz').value),
+    fixed_faces: bcData.fixed_faces,
+    loads:       bcData.loads,
+  };
+
+  try {
+    const res  = await fetch(`${API}/reconstruct_solution`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const data = await res.json();
+
+    if (!sceneOut) {
+      const viewerEl = document.getElementById('viewer-out');
+      viewerEl.innerHTML = '<div class="info-bar" id="info-out" style="display:none"></div>';
+      sceneOut = makeViewer('viewer-out');
+    }
+    loadSTLIntoViewer(data.stl_b64, sceneOut, 'info-out');
+    setViewMode('stl');
+    log(`Solution #${idx} loaded: C=${data.compliance_Nm?.toExponential(2)}, m=${data.mass_kg?.toFixed(3)}kg`);
+
+    // Auto-download
+    const a    = document.createElement('a');
+    const blob = new Blob(
+      [Uint8Array.from(atob(data.stl_b64), c => c.charCodeAt(0))],
+      {type: 'application/octet-stream'}
+    );
+    a.href = URL.createObjectURL(blob);
+    a.download = `pareto_solution_${idx}.stl`;
+    a.click();
+
+  } catch (err) { log('Load error: ' + err.message); }
+  document.getElementById('run-btn').disabled = false;
 }
 
 // ── Mechanical report render ─────────────────────────────────────────────
