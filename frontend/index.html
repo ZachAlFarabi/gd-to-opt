@@ -342,6 +342,21 @@
              oninput="document.getElementById('fr-label').textContent=parseFloat(this.value).toFixed(1)">
     </div>
 
+    <div class="section">
+      <label>Stress constraint <span style="font-size:10px;color:#555;margin-left:4px">(SF=0 disables)</span></label>
+      <div style="display:flex;align-items:center;gap:10px;margin-top:4px">
+        <input type="range" id="safety-factor" min="0" max="5" step="0.1" value="0"
+               style="flex:1" oninput="updateSFLabel()">
+        <span id="sf-label"
+              style="min-width:52px;text-align:right;font-family:monospace;font-size:12px;color:#555">
+          disabled
+        </span>
+      </div>
+      <div id="sf-info" style="font-size:10px;color:#555;margin-top:3px;display:none">
+        Max stress: <span id="sf-stress-limit">—</span> MPa
+      </div>
+    </div>
+
     <!-- Boundary conditions -->
     <div class="section" id="bc-section">
 
@@ -1384,6 +1399,28 @@ function log(msg) {
   el.scrollTop = el.scrollHeight;
 }
 
+// ── Stress constraint SF slider ───────────────────────────────────────────
+const YIELD_MPa = { Ti64: 1125, AlSi10Mg: 265, '316L': 547 };
+
+function updateSFLabel() {
+  const sf   = parseFloat(document.getElementById('safety-factor').value);
+  const lbl  = document.getElementById('sf-label');
+  const info = document.getElementById('sf-info');
+  const mat  = document.getElementById('material').value;
+  const sy   = YIELD_MPa[mat] || 1125;
+
+  if (sf <= 0) {
+    lbl.textContent    = 'disabled';
+    lbl.style.color    = '#555';
+    info.style.display = 'none';
+  } else {
+    lbl.textContent    = 'SF ' + sf.toFixed(1);
+    lbl.style.color    = sf < 1.5 ? '#ff4d6a' : sf < 2.5 ? '#f0a500' : '#00d4aa';
+    info.style.display = 'block';
+    document.getElementById('sf-stress-limit').textContent = (sy / sf).toFixed(0);
+  }
+}
+
 // ── Run optimisation ─────────────────────────────────────────────────────
 async function runOptimise() {
   if (!inputSTLb64) return;
@@ -1434,6 +1471,7 @@ async function runOptimise() {
     max_iter:        parseInt(document.getElementById('max-iter').value),
     filter_radius:   parseFloat(document.getElementById('filter-radius').value),
     p_simp:          3.0,
+    safety_factor:   parseFloat(document.getElementById('safety-factor').value),
   };
 
   try {

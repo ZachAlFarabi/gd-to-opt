@@ -80,6 +80,14 @@ _PRESETS: dict[str, dict] = {
 }
 
 
+# Yield strengths [Pa] for LPBF-produced materials (as-built)
+YIELD_STRENGTHS = {
+    "Ti64":     1125e6,   # Ti-6Al-4V LPBF
+    "AlSi10Mg":  265e6,   # AlSi10Mg LPBF
+    "316L":      547e6,   # 316L SS LPBF
+}
+
+
 # ---------------------------------------------------------------------------
 # MaterialModel
 # ---------------------------------------------------------------------------

@@ -175,9 +175,13 @@ def test_hv_positive():
 
 def test_gd_config_defaults():
     cfg = GDConfig()
-    assert cfg.pop_size == 40
-    assert cfg.n_gen    == 5
-    assert cfg.material == "Ti64"
+    assert cfg.pop_size  == 20
+    assert cfg.n_gen     == 3
+    assert cfg.simp_iter == 15
+    assert cfg.mesh_nx   == 12
+    assert cfg.mesh_ny   == 10
+    assert cfg.mesh_nz   == 8
+    assert cfg.material  == "Ti64"
 
 def test_gd_config_n_workers_positive():
     cfg = GDConfig()
@@ -216,9 +220,11 @@ def test_problem_bounds(tiny_gd_config):
 
 def test_evaluate_individual_runs(tiny_gd_config):
     """Single evaluation on tiny mesh must return finite objectives."""
-    x       = np.array([0.4, 0.0, 0.0, 1.5])
+    x        = np.array([0.4, 0.0, 0.0, 1.5])
     cfg_dict = tiny_gd_config.__dict__
-    c, m, v, err = _evaluate_individual((x, cfg_dict))
+    # _evaluate_individual returns (idx, c, m, v, err) after joblib refactor
+    result = _evaluate_individual((0, x, cfg_dict))
+    idx, c, m, v, err = result
     assert err == "", f"Evaluation failed: {err[:300]}"
     assert c > 0 and np.isfinite(c)
     assert m > 0 and np.isfinite(m)

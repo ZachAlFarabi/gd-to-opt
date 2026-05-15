@@ -100,6 +100,7 @@ class OptimiseRequest(BaseModel):
     max_iter:        int   = Field(40, ge=5, le=200)
     filter_radius:   float = Field(1.5, ge=0.5, le=3.0)
     p_simp:          float = Field(3.0, ge=1.0, le=5.0)
+    safety_factor:   float = Field(0.0, ge=0.0, le=10.0)  # 0 = disabled (D32)
     patches:         list[PatchRequest] | None = None
 
 
@@ -363,11 +364,23 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
             def _on_progress(iteration, compliance, change):
                 progress_q.put((iteration, compliance, change))
 
+            # Stress constraint config (D32)
+            from gdto.stress_constraint import StressConfig as _StressConfig
+            sf_val     = float(getattr(req, 'safety_factor', 0.0) or 0.0)
+            stress_cfg = _StressConfig(
+                safety_factor  = sf_val,
+                p_norm         = 6,
+                q_stress       = 0.5,
+                penalty_weight = 1.0,
+                penalty_update = 1.5,
+            ) if sf_val > 0 else None
+
             def _run_simp():
                 try:
                     result_holder[0] = run_simp(
                         problem, config=cfg,
                         thermal_cfg=thermal_cfg,
+                        stress_cfg=stress_cfg,
                         on_progress=_on_progress,
                     )
                 except Exception as e:

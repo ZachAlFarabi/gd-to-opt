@@ -27,6 +27,14 @@ from dataclasses import dataclass, field
 
 from gdto.mesh_material import ProblemData
 from gdto.filters import DensityFilter, OverhangFilter
+from gdto.stress_constraint import (
+    StressConfig, StressConstraintHandler,
+    compute_element_stress, p_norm_stress,
+    p_norm_sensitivity_direct, compute_stress_adjoint_rhs,
+)
+import logging
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +242,7 @@ class SIMPSolver:
         problem:     ProblemData,
         config:      SIMPConfig,
         thermal_cfg: ThermalConfig | None = None,
+        stress_cfg:  StressConfig | None = None,
     ) -> None:
         self.problem = problem
         self.config  = config
@@ -263,6 +272,21 @@ class SIMPSolver:
             self._thermal_asm = ThermalAssembler(problem.mesh, k_thermal=tc["k"])
             self._alpha       = tc["alpha"]
             self._T_ref       = tc["T_ref"]
+
+        # Stress constraint handler (D31) — inactive if SF=0
+        self._stress_cfg     = stress_cfg or StressConfig()
+        self._stress_handler = None
+        if self._stress_cfg.safety_factor > 0:
+            from gdto.mesh_material import YIELD_STRENGTHS
+            mat_name = problem.material.name
+            sy = YIELD_STRENGTHS.get(mat_name,
+                 YIELD_STRENGTHS.get("Ti64", 1125e6))
+            self._stress_handler = StressConstraintHandler(self._stress_cfg, sy)
+            print(f"DEBUG stress_handler: {self._stress_handler}, SF={self._stress_cfg.safety_factor}")
+            log.info(
+                f"Stress constraint active: SF={self._stress_cfg.safety_factor}, "
+                f"sigma_limit={sy / self._stress_cfg.safety_factor / 1e6:.0f} MPa"
+            )
 
     def solve(self, design_params: dict | None = None, on_progress=None) -> SIMPResult:
         """
@@ -434,6 +458,60 @@ class SIMPSolver:
                     * np.einsum('ei,ei->e', Ue, sig_th_raw @ B_c)
                 )
                 dc_d_rho_filtered += dc_thermal
+
+            # ── Stress constraint (D28–D31) ────────────────────────────────
+            if self._stress_handler is not None and self._stress_handler.active:
+                sh = self._stress_handler
+                sy = sh.sigma_yield
+
+                sigma_vm = compute_element_stress(
+                    u_full, mesh, asm, prob.material
+                )
+                tilde_sigma = p_norm_stress(
+                    sigma_vm, rho_filtered, sy,
+                    P=self._stress_cfg.p_norm,
+                    q=self._stress_cfg.q_stress,
+                )
+
+                ds_direct = p_norm_sensitivity_direct(
+                    sigma_vm, rho_filtered, sy,
+                    P=self._stress_cfg.p_norm,
+                    q=self._stress_cfg.q_stress,
+                )
+
+                # Adjoint solve for displacement-path sensitivity (D29)
+                g = compute_stress_adjoint_rhs(
+                    sigma_vm, rho_filtered, u_full,
+                    mesh, asm, prob.material, sy,
+                    P=self._stress_cfg.p_norm,
+                    q=self._stress_cfg.q_stress,
+                )
+                import scipy.sparse.linalg as _spla
+                lam_f    = _spla.spsolve(K_ff, -g[bc.free_dofs])
+                lam_full = bc.expand(lam_f)
+
+                # Adjoint term: lam^T * dK/drho * u
+                Lam_e  = lam_full[mesh.dof_map]
+                Ue_    = u_full[mesh.dof_map]
+                adj_se = np.einsum('ei,ei->e', Lam_e, Ue_ @ asm.Ke0.T)
+                ds_adj = (
+                    p_current
+                    * rho_filtered ** (p_current - 1.0)
+                    * (1.0 - cfg.E_min_factor)
+                    * adj_se
+                )
+
+                dc_stress = sh.sensitivity(tilde_sigma, ds_direct + ds_adj)
+                sh.update(tilde_sigma)
+
+                # Temporary debug
+                print(f"  stress: tilde={tilde_sigma:.4f} "
+                      f"dc_stress_max={np.abs(dc_stress).max():.3e} "
+                      f"dc_compliance_max={np.abs(dc_d_rho_filtered).max():.3e}")
+
+                # Add stress penalty sensitivity to compliance sensitivity (D31)
+                dc_d_rho_filtered = dc_d_rho_filtered + dc_stress
+            # ── End stress constraint ──────────────────────────────────────
 
             # 6. Chain rule backprop through density filter (Decision 11)
             dc_drho_filtered = self._density_filter.backprop(dc_d_rho_filtered)
@@ -791,6 +869,7 @@ def run_simp(
     design_params:     dict | None       = None,
     config:            SIMPConfig | None = None,
     thermal_cfg:       ThermalConfig | None = None,
+    stress_cfg:        StressConfig | None = None,
     on_progress=None,
     progress_callback=None,
 ) -> SIMPResult:
@@ -800,9 +879,13 @@ def run_simp(
     When thermal_cfg is provided and active, the optimiser minimises
     thermoelastic compliance — the combined response to mechanical and
     thermal loading. The thermal solve runs every iteration.
+
+    When stress_cfg is provided with safety_factor > 0, the optimiser
+    enforces a stress constraint via augmented Lagrangian (D31).
     """
     if config is None:
         config = SIMPConfig()
     cb = progress_callback or on_progress
-    solver = SIMPSolver(problem, config, thermal_cfg=thermal_cfg)
+    solver = SIMPSolver(problem, config, thermal_cfg=thermal_cfg,
+                        stress_cfg=stress_cfg)
     return solver.solve(design_params, on_progress=cb)
