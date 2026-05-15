@@ -787,11 +787,12 @@ class SIMPSolver:
 # ---------------------------------------------------------------------------
 
 def run_simp(
-    problem:       ProblemData,
-    design_params: dict | None       = None,
-    config:        SIMPConfig | None = None,
-    thermal_cfg:   ThermalConfig | None = None,
+    problem:           ProblemData,
+    design_params:     dict | None       = None,
+    config:            SIMPConfig | None = None,
+    thermal_cfg:       ThermalConfig | None = None,
     on_progress=None,
+    progress_callback=None,
 ) -> SIMPResult:
     """
     Run the SIMP inner loop. Convenience wrapper around SIMPSolver.
@@ -802,5 +803,6 @@ def run_simp(
     """
     if config is None:
         config = SIMPConfig()
+    cb = progress_callback or on_progress
     solver = SIMPSolver(problem, config, thermal_cfg=thermal_cfg)
-    return solver.solve(design_params, on_progress=on_progress)
+    return solver.solve(design_params, on_progress=cb)

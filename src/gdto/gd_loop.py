@@ -16,9 +16,9 @@ Objectives (3):
     f[2]  support_volume_m3 [m³]  — printability cost (minimise)
 
 Decisions implemented:
-    D23 — NSGA-II config: pop=40, gen=5 default, SBX η=15, PM η=20
+    D23 — NSGA-II config: pop=20, gen=3 default, SBX η=15, PM η=20
     D24 — Objective interface: pymoo Problem, normalised by gen-1 reference
-    D25 — Parallelisation: ProcessPoolExecutor, max_workers=cpu_count-1
+    D25 — Parallelisation: joblib loky backend (macOS-safe), n_jobs=cpu//2
     D26 — Pareto output: ParetoSolution dataclass, JSON front, STL on demand
 """
 
@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import os
 import time
-import json
 import logging
 import traceback
 import numpy as np
 from dataclasses import dataclass, field, asdict
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Callable
+
+from joblib import Parallel, delayed
 
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.problem import Problem
@@ -41,7 +41,7 @@ from pymoo.operators.mutation.pm import PM
 from pymoo.operators.sampling.rnd import FloatRandomSampling
 from pymoo.optimize import minimize
 
-from gdto.mesh_material import build_problem, ProblemData
+from gdto.mesh_material import build_problem
 from gdto.simp import run_simp, SIMPConfig, ThermalConfig
 from gdto.objectives import compute_objectives, normalise_objectives
 
@@ -84,14 +84,14 @@ class GDConfig:
     load_mag    : load magnitude [N]
     lx, ly, lz : domain dimensions [m]
     """
-    pop_size:    int   = 40
-    n_gen:       int   = 5
-    n_workers:   int   = field(default_factory=lambda: max(1, (os.cpu_count() or 2) - 1))
-    simp_iter:   int   = 40
-    simp_tol:    float = 1e-2
-    mesh_nx:     int   = 20
-    mesh_ny:     int   = 20
-    mesh_nz:     int   = 20
+    pop_size:    int   = 20
+    n_gen:       int   = 3
+    n_workers:   int   = 1      # unused directly; joblib uses cpu_count//2
+    simp_iter:   int   = 15
+    simp_tol:    float = 5e-2
+    mesh_nx:     int   = 12
+    mesh_ny:     int   = 10
+    mesh_nz:     int   = 8
     material:    str   = "Ti64"
     fixed_faces: list  = field(default_factory=lambda: ["zmin"])
     load_face:   str   = "zmax"
@@ -121,9 +121,23 @@ class ParetoSolution:
     report:                dict | None = None
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        d.pop('stl_b64', None)    # omit STL from JSON by default
-        return d
+        cd = self.crowding_distance
+        if cd is None or (isinstance(cd, float) and (cd != cd or cd == float('inf'))):
+            cd = 0.0
+        return {
+            "solution_id":           int(self.solution_id),
+            "volume_fraction":       float(self.volume_fraction),
+            "overhang_weight":       float(self.overhang_weight),
+            "build_orientation_deg": float(self.build_orientation_deg),
+            "min_feature_size":      float(self.min_feature_size),
+            "compliance_Nm":         float(self.compliance_Nm),
+            "mass_kg":               float(self.mass_kg),
+            "support_volume_m3":     float(self.support_volume_m3),
+            "rank":                  int(self.rank),
+            "crowding_distance":     float(cd),
+            "report":                self.report,
+        }
+        # stl_b64 deliberately omitted — fetched on demand via /reconstruct_solution
 
 
 @dataclass
@@ -141,36 +155,36 @@ class GDResult:
 
     def to_dict(self) -> dict:
         return {
-            "n_solutions":     len(self.pareto_solutions),
-            "n_generations":   self.n_generations,
-            "n_evaluations":   self.n_evaluations,
-            "wall_time_s":     round(self.wall_time_s, 1),
-            "objective_names": self.objective_names,
-            "objective_ref":   self.objective_ref,
-            "solutions": [s.to_dict() for s in self.pareto_solutions],
+            "n_solutions":     int(len(self.pareto_solutions)),
+            "n_generations":   int(self.n_generations),
+            "n_evaluations":   int(self.n_evaluations),
+            "wall_time_s":     float(round(self.wall_time_s, 1)),
+            "objective_names": list(self.objective_names),
+            "objective_ref":   [float(v) for v in self.objective_ref],
+            "solutions":       [s.to_dict() for s in self.pareto_solutions],
         }
 
 
 # ── Worker function (runs in separate process) ───────────────────────────────
 
-def _evaluate_individual(args: tuple) -> tuple[float, float, float, str]:
+def _evaluate_individual(args: tuple) -> tuple:
     """
     Evaluate one design parameter vector by running SIMP.
-    Runs in a worker process — must be picklable.
 
     Parameters
     ----------
-    args : (x_vec, gd_config_dict)
+    args : (idx, x_vec, gd_config_dict)
+        idx            : population index (returned for ordering)
         x_vec          : (4,) design parameter vector
         gd_config_dict : GDConfig serialised as dict (for pickling)
 
     Returns
     -------
-    (compliance_Nm, mass_kg, support_volume_m3, error_msg)
+    (idx, compliance_Nm, mass_kg, support_volume_m3, error_msg)
     error_msg is empty string on success.
     """
     try:
-        x, cfg_dict = args
+        idx, x, cfg_dict = args
         cfg = GDConfig(**cfg_dict)
 
         # Unpack design variables
@@ -199,13 +213,14 @@ def _evaluate_individual(args: tuple) -> tuple[float, float, float, str]:
 
         # SIMP config
         simp_cfg = SIMPConfig(
-            max_iter        = cfg.simp_iter,
-            tol             = cfg.simp_tol,
-            volume_fraction = vf,
-            filter_radius   = mfs,
-            update_scheme   = "auto",
-            p_start         = 2.0,
-            p_end           = 3.0,
+            max_iter          = cfg.simp_iter,
+            tol               = cfg.simp_tol,
+            volume_fraction   = vf,
+            filter_radius     = mfs,
+            update_scheme     = "auto",
+            p_start           = 2.0,
+            p_end             = 3.0,
+            snapshot_interval = 0,    # disable snapshots in GD — saves memory
         )
 
         # Thermal config
@@ -220,10 +235,11 @@ def _evaluate_individual(args: tuple) -> tuple[float, float, float, str]:
                           design_params=design_params)
 
         objs = compute_objectives(result)
-        return (objs[0], objs[1], objs[2], "")
+        return (idx, objs[0], objs[1], objs[2], "")
 
     except Exception as e:
-        return (1e10, 1e10, 1e10, traceback.format_exc())
+        idx = args[0] if args else -1
+        return (idx, 1e10, 1e10, 1e10, traceback.format_exc())
 
 
 # ── pymoo Problem class ───────────────────────────────────────────────────────
@@ -253,6 +269,7 @@ class TopOptProblem(Problem):
         self.progress_callback = progress_callback
         self._ref              = None     # set after first generation
         self._n_eval           = 0
+        self._current_gen      = 0
         self._all_objs         = []
         self._all_x            = []
         # serialise config for pickling
@@ -261,56 +278,74 @@ class TopOptProblem(Problem):
         }
 
     def _evaluate(self, X, out, *args, **kwargs):
-        """
-        Evaluate a population matrix X of shape (n, 4).
-        Fills out["F"] with normalised objectives of shape (n, 3).
-        """
-        n = X.shape[0]
+        n   = X.shape[0]
         cfg = self.gd_config
-        args_list = [(X[i], self._cfg_dict) for i in range(n)]
+        F_raw     = np.full((n, 3), 1e10)
+        n_jobs    = max(1, (os.cpu_count() or 4) // 2)
+        args_list = [(i, X[i], self._cfg_dict) for i in range(n)]
 
-        F_raw = np.full((n, 3), 1e10)
+        if self.progress_callback:
+            self.progress_callback({
+                "type":   "gen_start",
+                "gen":    self._current_gen + 1,
+                "n_gen":  cfg.n_gen,
+                "n_eval": n,
+                "n_jobs": n_jobs,
+            })
 
-        # Parallel evaluation (D25)
-        with ProcessPoolExecutor(max_workers=cfg.n_workers) as executor:
-            futures = {
-                executor.submit(_evaluate_individual, a): i
-                for i, a in enumerate(args_list)
-            }
-            for future in as_completed(futures):
-                i   = futures[future]
-                res = future.result()
-                c, m, v, err = res
+        try:
+            # generator_unordered yields each result the moment it finishes
+            results_iter = Parallel(
+                n_jobs    = n_jobs,
+                backend   = 'loky',
+                return_as = 'generator_unordered',
+            )(delayed(_evaluate_individual)(a) for a in args_list)
+
+            for idx, c, m, v, err in results_iter:
                 if err:
-                    log.warning(f"Eval {i} failed: {err[:200]}")
+                    log.warning(f"Eval failed (idx={idx}): {err[:100]}")
                 else:
+                    F_raw[idx] = [c, m, v]
+
+                self._n_eval += 1
+                if self.progress_callback:
+                    self.progress_callback({
+                        "type":       "evaluation",
+                        "eval_id":    self._n_eval,
+                        "gen":        self._current_gen + 1,
+                        "n_gen":      cfg.n_gen,
+                        "x":          X[idx].tolist(),
+                        "objectives": F_raw[idx].tolist(),
+                        "error":      bool(err),
+                    })
+
+        except Exception as e:
+            log.warning(f"Parallel failed ({e}) — running sequentially")
+            for i, a in enumerate(args_list):
+                idx, c, m, v, err = _evaluate_individual(a)
+                if not err:
                     F_raw[i] = [c, m, v]
                 self._n_eval += 1
                 if self.progress_callback:
                     self.progress_callback({
                         "type":       "evaluation",
                         "eval_id":    self._n_eval,
+                        "gen":        self._current_gen + 1,
+                        "n_gen":      cfg.n_gen,
                         "x":          X[i].tolist(),
                         "objectives": F_raw[i].tolist(),
                         "error":      bool(err),
                     })
 
-        # Store all raw objectives and design params
         self._all_objs.extend(F_raw.tolist())
         self._all_x.extend(X.tolist())
 
-        # Set reference values from first generation (D24)
         if self._ref is None:
             valid = F_raw[F_raw[:, 0] < 1e9]
-            if len(valid) > 0:
-                self._ref = valid.max(axis=0)
-            else:
-                self._ref = np.ones(3)
+            self._ref = valid.max(axis=0) if len(valid) > 0 else np.ones(3)
             log.info(f"Reference objectives set: {self._ref}")
 
-        # Normalise
-        F_norm = normalise_objectives(F_raw, self._ref)
-        out["F"] = F_norm
+        out["F"] = normalise_objectives(F_raw, self._ref)
 
 
 # ── Main GD runner ────────────────────────────────────────────────────────────
@@ -349,13 +384,13 @@ def run_gd(
     from pymoo.termination import get_termination
     termination = get_termination("n_gen", cfg.n_gen)
 
-    log.info(f"Starting NSGA-II: pop={cfg.pop_size}, max_gen={cfg.n_gen}, "
-             f"workers={cfg.n_workers}")
+    log.info(f"Starting NSGA-II: pop={cfg.pop_size}, max_gen={cfg.n_gen}")
 
     # Generation callback
     def on_generation(algorithm):
         gen = algorithm.n_gen
         pop = algorithm.pop
+        problem._current_gen = gen
         # Extract current Pareto front
         ranks = pop.get("rank")
         pareto_mask = ranks == 0
@@ -394,7 +429,13 @@ def run_gd(
         x = pareto_X[i]
         f = pareto_F_raw[i]
 
-        cd = float(res.pop.get("crowding")[i]) if hasattr(res.pop, 'get') else 0.0
+        try:
+            crowding_arr = res.pop.get("crowding")
+            cd = float(crowding_arr[i]) if crowding_arr is not None else 0.0
+            if cd != cd or cd == float('inf'):   # guard nan/inf
+                cd = 0.0
+        except Exception:
+            cd = 0.0
 
         pareto_solutions.append(ParetoSolution(
             solution_id           = i,
