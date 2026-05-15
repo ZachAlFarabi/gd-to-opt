@@ -200,6 +200,93 @@
 
   /* ── Select mode cursor ── */
   .viewer.select-mode canvas { cursor: crosshair !important; }
+
+  /* ── Run mode toggle ── */
+  .run-mode-toggle { display:flex; gap:4px; margin-bottom:12px; }
+  .run-mode-btn {
+    flex:1; padding:6px 8px; font-size:11px; font-weight:600;
+    border-radius:6px; border:1px solid #2a2a38;
+    background:#1a1a24; color:#666; cursor:pointer; text-align:center;
+  }
+  .run-mode-btn.active { background:#1e3a5f; border-color:#4080c0; color:#80b4ff; }
+
+  /* ── GD config panel ── */
+  .gd-config { display:none; }
+  .gd-config.visible { display:block; }
+
+  /* ── Pareto panel ── */
+  .pareto-panel {
+    border-top: 1px solid #2a2a38;
+    padding: 12px 16px;
+  }
+  .pareto-header {
+    display:flex; justify-content:space-between; align-items:center;
+    margin-bottom:8px;
+  }
+  .pareto-count {
+    font-family: monospace;
+    font-size:11px; color:#00d4aa;
+  }
+  .pareto-axis-sel {
+    display:flex; gap:6px; margin-bottom:10px; font-size:11px; color:#888; align-items:center;
+  }
+  .pareto-axis-sel select {
+    padding:3px 6px; font-size:11px; background:#1e1e2a;
+    border:1px solid #2a2a38; border-radius:4px; color:#e0e0e8;
+  }
+
+  /* ── Solution list ── */
+  .solution-list { max-height:180px; overflow-y:auto; display:flex; flex-direction:column; gap:4px; margin-top:8px; }
+  .solution-item {
+    background:#1e1e2a; border:1px solid #2a2a38; border-radius:5px;
+    padding:6px 10px; font-size:11px; cursor:pointer; display:flex;
+    justify-content:space-between; align-items:center;
+    transition: border-color .15s;
+  }
+  .solution-item:hover { border-color:#4080c0; }
+  .solution-item.selected { border-color:#00d4aa; background:#0a1a14; }
+  .sol-id { font-family:monospace; color:#555; font-size:10px; }
+  .sol-objs { display:flex; gap:8px; }
+  .sol-obj { text-align:right; }
+  .sol-obj-val { font-weight:600; color:#c8d3e8; }
+  .sol-obj-lbl { color:#555; }
+  .sol-load-btn {
+    padding:2px 8px; font-size:10px; border-radius:4px;
+    border:1px solid #4080c0; background:transparent; color:#80b4ff;
+    cursor:pointer;
+  }
+  .sol-load-btn:hover { background:#1e3a5f; }
+
+  /* ── Generation progress ── */
+  .gen-progress { font-size:11px; color:#555; margin-top:6px; }
+
+  /* ── Panel header ── */
+  .panel-header {
+    font-size: 11px; font-weight: 400; letter-spacing: .12em;
+    text-transform: uppercase; color: #8a96a8;
+    padding: 14px 16px 12px; border-bottom: 1px solid #1e2430;
+  }
+
+  /* ── Result panel tabs ── */
+  .result-tab {
+    font-size: 11px; font-weight: 400; letter-spacing: .12em;
+    text-transform: uppercase; color: #5a6478;
+    background: transparent; border: none;
+    border-bottom: 2px solid transparent;
+    padding: 14px 16px 11px; cursor: pointer;
+    transition: color .15s, border-color .15s;
+  }
+  .result-tab:hover  { color: #8a96a8; }
+  .result-tab.active { color: #e4eaf5; border-bottom-color: #4080c0; }
+
+  /* ── Log pane (Pareto tab + Result tab) ── */
+  .log-pane {
+    padding: 8px 10px; overflow-y: auto; max-height: 140px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10.5px; line-height: 1.6; color: #5a6478;
+  }
+  .log-pane p { margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .log-pane p.highlight { color: #a0c4ff; }
 </style>
 </head>
 <body>
@@ -419,27 +506,52 @@
       </div>
     </div>
 
+    <div class="section" id="run-mode-section">
+      <div class="run-mode-toggle">
+        <button class="run-mode-btn active" id="btn-single-run"
+                onclick="setRunMode('single')">Single run</button>
+        <button class="run-mode-btn" id="btn-gd-run"
+                onclick="setRunMode('gd')">Generative design</button>
+      </div>
+
+      <!-- GD config (hidden in single mode) -->
+      <div class="gd-config" id="gd-config-panel">
+        <div class="grid-2" style="margin-bottom:8px">
+          <div>
+            <label>Population</label>
+            <input type="number" id="gd-pop" value="20" min="4" max="200"
+                   oninput="updateGDEstimate()">
+          </div>
+          <div>
+            <label>Generations</label>
+            <input type="number" id="gd-gen" value="3" min="1" max="20"
+                   oninput="updateGDEstimate()">
+          </div>
+        </div>
+        <div style="font-size:11px;color:#888;margin-bottom:4px">
+          Exploration mesh (smaller = faster per eval)
+        </div>
+        <div class="grid-3" style="margin-bottom:8px">
+          <input type="number" id="gd-nx" value="12" min="4" max="20"
+                 placeholder="nx" title="GD mesh nx" oninput="updateGDEstimate()">
+          <input type="number" id="gd-ny" value="10" min="4" max="20"
+                 placeholder="ny" title="GD mesh ny" oninput="updateGDEstimate()">
+          <input type="number" id="gd-nz" value="8"  min="4" max="20"
+                 placeholder="nz" title="GD mesh nz" oninput="updateGDEstimate()">
+        </div>
+        <div style="font-size:11px;color:#555;margin-bottom:8px">
+          Est. evaluations: <span id="gd-eval-est">60</span> ·
+          Est. time: <span id="gd-time-est">~9 min</span>
+        </div>
+      </div>
+    </div>
+
     <div class="section">
       <button class="btn btn-primary" id="run-btn" onclick="runOptimise()" disabled>
         Run optimisation
       </button>
     </div>
 
-    <div id="progress-section">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <label style="margin:0">Progress</label>
-        <span id="iter-counter" style="font-size:11px;color:#555">—</span>
-      </div>
-      <div style="background:#1e1e2a;border-radius:4px;height:6px;margin-bottom:8px;overflow:hidden">
-        <div id="progress-bar" style="height:100%;width:0%;background:#2563eb;border-radius:4px;transition:width .3s"></div>
-      </div>
-      <div id="log"><p>Load an STL to begin</p></div>
-    </div>
-
-    <div class="compliance-chart-wrap">
-      <label>Compliance history</label>
-      <canvas id="chart" height="120"></canvas>
-    </div>
   </div>
 
   <!-- ── CENTRE PANEL: input STL viewer ───────────────────────────── -->
@@ -461,39 +573,209 @@
            onchange="handleFile(this.files[0])">
   </div>
 
-  <!-- ── RIGHT PANEL: result viewer + report ──────────────────────── -->
-  <div class="panel">
-    <div class="panel-header" style="display:flex;justify-content:space-between;align-items:center">
-      <span>Optimised result</span>
-      <div class="view-toggle">
-        <button class="view-btn active" id="btn-stl"     onclick="setViewMode('stl')">STL</button>
-        <button class="view-btn"        id="btn-density" onclick="setViewMode('density')">Density</button>
-        <button class="view-btn"        id="btn-stress"  onclick="setViewMode('stress')">Stress</button>
-        <button class="view-btn"        id="btn-thermal" onclick="setViewMode('thermal')">Thermal</button>
+  <!-- ── RIGHT PANEL ──────────────────────────────────────────────────── -->
+  <div class="panel" id="panel-right">
+
+    <!-- Tab bar -->
+    <div style="display:flex;border-bottom:1px solid #1e2430;background:#111318">
+      <button class="result-tab active" id="rtab-pareto"
+              onclick="setResultTab('pareto')">Pareto / Progress</button>
+      <button class="result-tab"        id="rtab-result"
+              onclick="setResultTab('result')">Optimised Result</button>
+    </div>
+
+    <!-- ═══ TAB 1 — PARETO / PROGRESS ═══ -->
+    <div id="result-tab-pareto">
+
+      <!-- GD dual progress (hidden until GD run) -->
+      <div id="gd-progress-wrap" style="display:none;
+           padding:8px 14px;border-bottom:1px solid #1e2430">
+        <div style="display:flex;justify-content:space-between;
+                    font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+                    color:#5a6478;margin-bottom:3px">
+          <span>NSGA-II generations</span>
+          <span id="gd-progress-right" style="color:#8a96a8">—</span>
+        </div>
+        <div style="background:#0a0c0f;border-radius:3px;
+                    height:4px;overflow:hidden;margin-bottom:7px">
+          <div id="gd-gen-bar"
+               style="height:100%;width:0%;background:#2563eb;
+                      border-radius:3px;transition:width .4s ease"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;
+                    font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+                    color:#5a6478;margin-bottom:3px">
+          <span>Evaluations</span>
+          <span id="iter-counter" style="color:#8a96a8">—</span>
+        </div>
+        <div style="background:#0a0c0f;border-radius:3px;
+                    height:4px;overflow:hidden">
+          <div id="progress-bar"
+               style="height:100%;width:0%;background:#2563eb;
+                      border-radius:3px;transition:width .2s ease"></div>
+        </div>
       </div>
-    </div>
-    <div class="iter-bar" id="iter-bar">
-      <span>Iteration</span>
-      <input type="range" id="iter-slider" min="0" max="0" value="0"
-             style="flex:1" oninput="scrubToIter(parseInt(this.value))">
-      <span id="iter-slider-label" style="min-width:52px;text-align:right;color:#a0c4ff">—</span>
-    </div>
-    <div id="colorbar-wrap" style="display:none;padding:6px 14px 10px;
-         background:#1a1a24;border-bottom:1px solid #2a2a38">
-      <div style="display:flex;align-items:center;gap:8px">
-        <span id="cb-min" style="font-size:11px;color:#888;min-width:40px;text-align:right">0</span>
-        <div id="cb-gradient" style="flex:1;height:10px;border-radius:5px;
-             background:linear-gradient(to right,#0a1f59,#5ab4ff)"></div>
-        <span id="cb-max" style="font-size:11px;color:#888;min-width:40px">100</span>
-        <span id="cb-unit" style="font-size:11px;color:#555;min-width:28px">MPa</span>
+
+      <!-- Single-run progress (hidden until single run) -->
+      <div id="single-progress-wrap" style="display:none;
+           padding:8px 14px;border-bottom:1px solid #1e2430">
+        <div style="display:flex;justify-content:space-between;
+                    font-size:10px;letter-spacing:.06em;text-transform:uppercase;
+                    color:#5a6478;margin-bottom:3px">
+          <span>SIMP iterations</span>
+          <span id="single-iter-counter" style="color:#8a96a8">—</span>
+        </div>
+        <div style="background:#0a0c0f;border-radius:3px;
+                    height:4px;overflow:hidden">
+          <div id="single-progress-bar"
+               style="height:100%;width:0%;background:#2563eb;
+                      border-radius:3px;transition:width .2s ease"></div>
+        </div>
       </div>
+
+      <!-- Hidden compliance chart (used for data tracking only, not displayed) -->
+      <canvas id="chart" style="display:none" width="1" height="1"></canvas>
+
+      <!-- Run log -->
+      <div class="log-pane" id="log" style="border-bottom:1px solid #1e2430;max-height:160px">
+        <p style="color:#2a3040">— awaiting run —</p>
+      </div>
+
+      <!-- Pareto front (GD mode only) -->
+      <div id="pareto-panel" style="display:none;padding:12px 14px">
+        <div style="display:flex;justify-content:space-between;
+                    align-items:center;margin-bottom:10px">
+          <span style="font-size:10px;letter-spacing:.1em;
+                       text-transform:uppercase;color:#8a96a8">Pareto Front</span>
+          <span id="pareto-count"
+                style="font-size:11px;font-family:monospace;color:#1D9E75">
+            0 solutions</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;
+                    font-size:11px;color:#888;align-items:center">
+          <span>X</span>
+          <select id="pareto-x-axis" onchange="updateParetoChart()">
+            <option value="0">Compliance</option>
+            <option value="1" selected>Mass</option>
+            <option value="2">Support vol</option>
+          </select>
+          <span>Y</span>
+          <select id="pareto-y-axis" onchange="updateParetoChart()">
+            <option value="0" selected>Compliance</option>
+            <option value="1">Mass</option>
+            <option value="2">Support vol</option>
+          </select>
+        </div>
+        <div style="position:relative;height:180px;margin-bottom:8px">
+          <canvas id="pareto-chart"></canvas>
+        </div>
+        <div id="gen-progress"
+             style="font-size:11px;color:#5a6478;margin-bottom:8px"></div>
+        <div id="solution-list"
+             style="display:flex;flex-direction:column;gap:4px;
+                    max-height:200px;overflow-y:auto"></div>
+      </div>
+
+      <!-- Mechanical report (single run) -->
+      <div id="report-container" style="padding:10px 14px"></div>
+
     </div>
-    <div class="viewer" id="viewer-out">
-      <div style="display:flex;align-items:center;justify-content:center;height:100%;
-                  color:#333;font-size:13px">Awaiting optimisation</div>
-      <div class="info-bar" id="info-out" style="display:none"></div>
+
+    <!-- ═══ TAB 2 — OPTIMISED RESULT ═══ -->
+    <div id="result-tab-result"
+         style="display:none;flex-direction:column;height:calc(100vh - 46px)">
+
+      <!-- View toggle -->
+      <div style="display:flex;align-items:center;padding:8px 14px;
+                  border-bottom:1px solid #1e2430;background:#111318;flex-shrink:0">
+        <div class="view-toggle">
+          <button class="view-btn active" id="btn-stl"
+                  onclick="setViewMode('stl')">STL</button>
+          <button class="view-btn" id="btn-density"
+                  onclick="setViewMode('density')">Density</button>
+          <button class="view-btn" id="btn-stress"
+                  onclick="setViewMode('stress')">Stress</button>
+          <button class="view-btn" id="btn-thermal"
+                  onclick="setViewMode('thermal')">Thermal</button>
+        </div>
+      </div>
+
+      <!-- Colorbar -->
+      <div id="colorbar-wrap" style="display:none;padding:5px 14px 8px;
+           background:#111318;border-bottom:1px solid #1e2430;flex-shrink:0">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span id="cb-min"
+                style="font-size:11px;color:#888;min-width:48px;
+                       text-align:right;font-family:monospace">0</span>
+          <div id="cb-gradient"
+               style="flex:1;height:9px;border-radius:4px;
+                      background:linear-gradient(to right,
+                        #0000ff,#00ffff,#00ff00,#ffff00,#ff0000)"></div>
+          <span id="cb-max"
+                style="font-size:11px;color:#888;min-width:48px;
+                       font-family:monospace">100</span>
+          <span id="cb-unit"
+                style="font-size:11px;color:#555;min-width:32px">MPa</span>
+        </div>
+      </div>
+
+      <!-- Density scrubber -->
+      <div class="iter-bar" id="iter-bar"
+           style="display:none;padding:6px 14px;background:#111318;
+                  border-bottom:1px solid #1e2430;gap:8px;align-items:center;
+                  font-size:11px;color:#888;flex-shrink:0">
+        <span>Iteration</span>
+        <input type="range" id="iter-slider" min="0" max="0" value="0"
+               style="flex:1" oninput="scrubToIter(parseInt(this.value))">
+        <span id="iter-slider-label"
+              style="min-width:52px;text-align:right;
+                     color:#a0c4ff;font-family:monospace">—</span>
+      </div>
+
+      <!-- Solution reconstruction progress + log (GD mode) -->
+      <div id="sol-progress-wrap" style="display:none;background:#181c24;
+           border-bottom:1px solid #1e2430;flex-shrink:0">
+
+        <!-- Progress bar row -->
+        <div style="padding:8px 14px 6px">
+          <div style="display:flex;justify-content:space-between;
+                      font-size:11px;color:#5a6478;margin-bottom:4px">
+            <span id="sol-progress-label">Loading solution...</span>
+            <span id="sol-progress-iter"
+                  style="font-family:monospace;color:#a0c4ff">—</span>
+          </div>
+          <div style="background:#111318;border-radius:3px;height:5px;overflow:hidden">
+            <div id="sol-progress-bar"
+                 style="height:100%;width:0%;background:#4080c0;
+                        border-radius:3px;transition:width .2s ease"></div>
+          </div>
+        </div>
+
+        <!-- Log + chart side by side -->
+        <div style="display:flex;gap:0;border-top:1px solid #1e2430">
+          <!-- SIMP iteration log -->
+          <div id="sol-log" style="flex:1;min-width:0;border-right:1px solid #1e2430">
+            <div class="log-pane" id="sol-log-inner" style="height:90px;max-height:90px"></div>
+          </div>
+          <!-- Compliance chart -->
+          <div style="width:180px;flex-shrink:0;padding:6px 8px;
+                      display:flex;flex-direction:column;justify-content:center">
+            <canvas id="sol-compliance-chart" width="164" height="78"></canvas>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- 3D viewer -->
+      <div class="viewer" id="viewer-out" style="flex:1;min-height:0">
+        <div style="display:flex;align-items:center;justify-content:center;
+                    height:100%;color:#2a3040;font-size:11px;
+                    letter-spacing:.1em;text-transform:uppercase">
+          Awaiting optimisation</div>
+        <div class="info-bar" id="info-out" style="display:none"></div>
+      </div>
+
     </div>
-    <div id="report-container"></div>
   </div>
 
 </div>
@@ -508,6 +790,55 @@ const API = 'http://localhost:8000';
 let inputSTLb64 = null;
 let complianceChart = null;
 let sceneIn = null, sceneOut = null;
+
+// ── GD state ─────────────────────────────────────────────────────────────
+let runMode            = 'single';
+let paretoData         = [];
+let paretoChart        = null;
+let selectedSolId      = null;
+let solComplianceChart = null;
+let currentDomainLx    = 0.1;
+let currentDomainLy    = 0.08;
+let currentDomainLz    = 0.06;
+let gdTimer          = null;
+let gdStartTime      = null;
+let gdEvalsCompleted = 0;
+let gdTotalEvals     = 0;
+
+function startGDTimer() {
+  gdStartTime      = Date.now();
+  gdEvalsCompleted = 0;
+  gdTotalEvals     = parseInt(document.getElementById('gd-pop').value) *
+                     parseInt(document.getElementById('gd-gen').value);
+  gdTimer = setInterval(() => {
+    const elapsed = (Date.now() - gdStartTime) / 1000;
+    const mins    = Math.floor(elapsed / 60);
+    const secs    = Math.floor(elapsed % 60);
+    const elStr   = mins > 0
+      ? `${mins}m ${secs.toString().padStart(2,'0')}s`
+      : `${secs}s`;
+
+    let etaStr = '';
+    if (gdEvalsCompleted >= 3) {
+      const secsPerEval = elapsed / gdEvalsCompleted;
+      const remaining   = (gdTotalEvals - gdEvalsCompleted) * secsPerEval;
+      const remMins     = Math.floor(remaining / 60);
+      const remSecs     = Math.floor(remaining % 60);
+      etaStr = remMins > 0
+        ? ` · ETA ${remMins}m ${remSecs.toString().padStart(2,'0')}s`
+        : ` · ETA ${remSecs}s`;
+    } else if (gdEvalsCompleted > 0) {
+      etaStr = ' · estimating...';
+    } else {
+      etaStr = ' · initialising workers...';
+    }
+    document.getElementById('iter-counter').textContent = `${elStr} elapsed${etaStr}`;
+  }, 1000);
+}
+
+function stopGDTimer() {
+  if (gdTimer) { clearInterval(gdTimer); gdTimer = null; }
+}
 
 // ── Server health check ──────────────────────────────────────────────────
 async function checkHealth() {
@@ -1020,6 +1351,8 @@ function initChart() {
       borderWidth: 1.5, pointRadius: 0, tension: 0.3
     }]},
     options: {
+      responsive: true,
+      maintainAspectRatio: false,
       animation: false,
       plugins: { legend: { display: false } },
       scales: {
@@ -1054,15 +1387,18 @@ function log(msg) {
 // ── Run optimisation ─────────────────────────────────────────────────────
 async function runOptimise() {
   if (!inputSTLb64) return;
+  if (runMode === 'gd') { runGDOptimise(); return; }
 
   document.getElementById('run-btn').disabled = true;
   document.getElementById('log').innerHTML = '';
   complianceChart.data.labels = [];
   complianceChart.data.datasets[0].data = [];
   complianceChart.update('none');
-  document.getElementById('progress-bar').style.width = '0%';
-  document.getElementById('progress-bar').style.background = '#2563eb';
-  document.getElementById('iter-counter').textContent = '—';
+  setResultTab('pareto');
+  showSingleProgress();
+  document.getElementById('single-progress-bar').style.width      = '0%';
+  document.getElementById('single-progress-bar').style.background = '#2563eb';
+  document.getElementById('single-iter-counter').textContent      = '—';
   // DO NOT clear patch overlays on run — user needs to see BCs during optimisation
   // renderPatchHighlights() is intentionally NOT called here
 
@@ -1136,22 +1472,24 @@ function handleEvent(ev) {
   } else if (ev.type === 'progress') {
     chartPush(ev.iteration, ev.compliance);
 
-    // Update progress bar
     const maxIter = parseInt(document.getElementById('max-iter').value);
     const pct = Math.min(100, (ev.iteration / maxIter) * 100);
-    document.getElementById('progress-bar').style.width = pct + '%';
-    document.getElementById('iter-counter').textContent =
-        `iter ${ev.iteration} / ${maxIter}`;
+    document.getElementById('single-progress-bar').style.width   = pct + '%';
+    document.getElementById('single-iter-counter').textContent   = ev.iteration + ' / ' + maxIter;
 
     if (ev.iteration % 5 === 0)
-      log(`Iter ${ev.iteration}: C=${ev.compliance.toExponential(3)} Δρ=${ev.change.toFixed(4)}`);
+      log('Iter ' + ev.iteration + ': C=' + ev.compliance.toExponential(3) +
+          ' Δρ=' + ev.change.toFixed(4));
   } else if (ev.type === 'domain') {
     const d = ev.info;
+    currentDomainLx = d.lx_m;
+    currentDomainLy = d.ly_m;
+    currentDomainLz = d.lz_m;
     log(`Domain: ${(d.lx_m*1000).toFixed(1)}×${(d.ly_m*1000).toFixed(1)}×${(d.lz_m*1000).toFixed(1)} mm`);
   } else if (ev.type === 'done') {
-    document.getElementById('progress-bar').style.width      = '100%';
-    document.getElementById('progress-bar').style.background = '#16a34a';
-    document.getElementById('iter-counter').textContent      = 'complete';
+    document.getElementById('single-progress-bar').style.width      = '100%';
+    document.getElementById('single-progress-bar').style.background = '#16a34a';
+    document.getElementById('single-iter-counter').textContent      = 'complete';
     log('Done.');
 
     // 1. Create output scene
@@ -1187,7 +1525,8 @@ function handleEvent(ev) {
       if (b) { b.style.opacity = hasData ? '1' : '0.35'; b.disabled = !hasData; }
     });
 
-    // 6. Default STL view
+    // 6. Default STL view + switch to Result tab
+    setResultTab('result');
     setViewMode('stl');
     renderReport(ev.report);
 
@@ -1214,7 +1553,7 @@ let patchHighlights = [];
 let stlGeomIn      = null;
 
 const PATCH_COLORS = {
-  fixed:       0x00ff88,   // bright green — clearly distinct from blue STL
+  fixed:       0x00ff88,   // bright green
   force:       0xff2222,   // red
   pressure:    0xff8844,   // orange
   flux:        0xff8800,   // amber
@@ -1482,6 +1821,559 @@ function collectBCsForRequest() {
   });
 
   return { patches: null, fixed_faces: fixedFaces, loads };
+}
+
+// ── Result panel tab switching ────────────────────────────────────────────
+function setResultTab(tab) {
+  document.getElementById('rtab-pareto').classList.toggle('active',  tab === 'pareto');
+  document.getElementById('rtab-result').classList.toggle('active',  tab === 'result');
+  document.getElementById('result-tab-pareto').style.display = tab === 'pareto' ? '' : 'none';
+  document.getElementById('result-tab-result').style.display = tab === 'result' ? 'flex' : 'none';
+}
+
+function showSingleProgress() {
+  document.getElementById('single-progress-wrap').style.display = 'block';
+  document.getElementById('gd-progress-wrap').style.display     = 'none';
+}
+
+function showGDProgress() {
+  document.getElementById('gd-progress-wrap').style.display     = 'block';
+  document.getElementById('single-progress-wrap').style.display = 'none';
+}
+
+// ── GD run mode switching ─────────────────────────────────────────────────
+function setRunMode(mode) {
+  runMode = mode;
+  document.getElementById('btn-single-run').classList.toggle('active', mode === 'single');
+  document.getElementById('btn-gd-run').classList.toggle('active',     mode === 'gd');
+  document.getElementById('gd-config-panel').classList.toggle('visible', mode === 'gd');
+  updateGDEstimate();
+}
+
+function updateGDEstimate() {
+  const pop     = parseInt(document.getElementById('gd-pop')?.value || 20);
+  const gen     = parseInt(document.getElementById('gd-gen')?.value || 3);
+  const gnx     = parseInt(document.getElementById('gd-nx')?.value  || 12);
+  const gny     = parseInt(document.getElementById('gd-ny')?.value  || 10);
+  const gnz     = parseInt(document.getElementById('gd-nz')?.value  || 8);
+  const evals     = pop * gen;
+  const n_elem    = gnx * gny * gnz;
+  const sPerEval  = Math.max(5, n_elem / 960 * 14);   // ~14s at 12×10×8
+  const workers   = Math.max(1, Math.floor((navigator.hardwareConcurrency || 4) / 2));
+  const totalSecs = Math.round(evals * sPerEval / workers);
+  const mins      = Math.floor(totalSecs / 60);
+  document.getElementById('gd-eval-est').textContent = evals;
+  document.getElementById('gd-time-est').textContent =
+    mins < 2 ? `~${totalSecs}s` : `~${mins} min`;
+}
+updateGDEstimate();
+
+// ── GD run ────────────────────────────────────────────────────────────────
+async function runGDOptimise() {
+  if (!inputSTLb64) return;
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('log').innerHTML = '';
+  paretoData = [];
+  document.getElementById('pareto-count').textContent = '0 solutions';
+  document.getElementById('solution-list').innerHTML = '';
+  document.getElementById('gen-progress').textContent = '';
+  setResultTab('pareto');
+  showGDProgress();
+  document.getElementById('pareto-panel').style.display = 'block';
+  document.getElementById('progress-bar').style.width      = '0%';
+  document.getElementById('progress-bar').style.background = '#2563eb';
+  document.getElementById('iter-counter').textContent      = '—';
+  document.getElementById('gd-gen-bar').style.width        = '0%';
+  document.getElementById('gd-gen-bar').style.background   = '#2563eb';
+  document.getElementById('gd-progress-right').textContent = '—';
+  stopGDTimer();
+  gdEvalsCompleted = 0;
+  gdTotalEvals     = parseInt(document.getElementById('gd-pop').value) *
+                     parseInt(document.getElementById('gd-gen').value);
+  // Let the panel layout settle before Chart.js measures canvas dimensions
+  setTimeout(() => initParetoChart(), 50);
+
+  const bcData = collectBCsForRequest();
+  const body = {
+    stl_b64:     inputSTLb64,
+    material:    document.getElementById('material').value,
+    nx:          parseInt(document.getElementById('nx').value),
+    ny:          parseInt(document.getElementById('ny').value),
+    nz:          parseInt(document.getElementById('nz').value),
+    gd_nx:       parseInt(document.getElementById('gd-nx').value || '12'),
+    gd_ny:       parseInt(document.getElementById('gd-ny').value || '10'),
+    gd_nz:       parseInt(document.getElementById('gd-nz').value || '8'),
+    pop_size:    parseInt(document.getElementById('gd-pop').value),
+    n_gen:       parseInt(document.getElementById('gd-gen').value),
+    simp_iter:   parseInt(document.getElementById('max-iter').value),
+    fixed_faces: bcData.fixed_faces,
+    loads:       bcData.loads,
+  };
+
+  log(`Starting GD: pop=${body.pop_size}, gen=${body.n_gen}, ` +
+      `est. ${body.pop_size * body.n_gen} evaluations`);
+
+  try {
+    const res    = await fetch(`${API}/gd_optimise`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    const reader = res.body.getReader();
+    const dec    = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try { handleGDEvent(JSON.parse(line.slice(6))); } catch {}
+      }
+    }
+  } catch (err) { log('GD Error: ' + err.message); }
+  document.getElementById('run-btn').disabled = false;
+}
+
+// ── GD event handler ──────────────────────────────────────────────────────
+function handleGDEvent(ev) {
+  if (ev.type === 'status') {
+    log(ev.message);
+
+  } else if (ev.type === 'domain') {
+    const d = ev.info;
+    currentDomainLx = d.lx_m;
+    currentDomainLy = d.ly_m;
+    currentDomainLz = d.lz_m;
+    log(`Domain: ${(d.lx_m*1000).toFixed(1)}×${(d.ly_m*1000).toFixed(1)}×${(d.lz_m*1000).toFixed(1)} mm`);
+
+  } else if (ev.type === 'gen_start') {
+    startGDTimer();
+    log(`── Gen ${ev.gen}/${ev.n_gen}: starting ${ev.n_eval} evals on ${ev.n_jobs} workers`);
+    document.getElementById('progress-bar').style.background = '#2563eb';
+
+  } else if (ev.type === 'heartbeat') {
+    // connection alive — timer handles the display, just update gen-progress
+    document.getElementById('gen-progress').textContent =
+      `Server alive · ${ev.elapsed}s elapsed`;
+
+  } else if (ev.type === 'evaluation') {
+    gdEvalsCompleted++;
+    const pct = Math.min(99, (ev.eval_id / gdTotalEvals) * 100);
+    document.getElementById('progress-bar').style.width = pct + '%';
+    if (ev.eval_id <= 2 || ev.eval_id % 5 === 0) {
+      const c       = ev.objectives?.[0]?.toExponential(2) ?? '?';
+      const m       = ev.objectives?.[1]?.toFixed(3) ?? '?';
+      const elapsed = gdStartTime
+        ? ((Date.now() - gdStartTime) / 1000 / gdEvalsCompleted).toFixed(1)
+        : '?';
+      log(`Gen ${ev.gen}/${ev.n_gen} | Eval ${ev.eval_id}: C=${c} N·m  m=${m} kg  (~${elapsed}s/eval)`);
+    }
+
+  } else if (ev.type === 'generation') {
+    const genPct = Math.min(100, (ev.gen / ev.n_gen) * 100);
+    document.getElementById('gd-gen-bar').style.width        = genPct + '%';
+    document.getElementById('gd-progress-right').textContent = `${ev.gen} / ${ev.n_gen} complete`;
+    document.getElementById('gen-progress').textContent =
+      `Gen ${ev.gen} / ${ev.n_gen} complete · ${ev.n_eval} evals · ${ev.pareto_size} Pareto solutions`;
+    log(`─── Generation ${ev.gen}/${ev.n_gen} — ${ev.pareto_size} Pareto solutions ───`);
+
+  } else if (ev.type === 'gd_progress') {
+    stopGDTimer();
+    document.getElementById('progress-bar').style.width      = '100%';
+    document.getElementById('progress-bar').style.background = '#16a34a';
+    document.getElementById('iter-counter').textContent      = 'complete';
+    document.getElementById('gd-gen-bar').style.width        = '100%';
+    document.getElementById('gd-gen-bar').style.background   = '#16a34a';
+    document.getElementById('gd-progress-right').textContent = 'complete';
+    document.getElementById('gen-progress').textContent =
+      `Gen ${ev.n_gen} complete · ${ev.n_eval} evaluations · ${ev.n_pareto} Pareto solutions · ${ev.wall_time}s`;
+    log(`GD complete: ${ev.n_pareto} Pareto solutions, ${ev.n_eval} evaluations, ${ev.wall_time}s`);
+
+  } else if (ev.type === 'done') {
+    stopGDTimer();
+    console.log('GD done event received, pareto:', ev.pareto);
+    if (!ev.pareto) {
+      log('ERROR: done event has no pareto data');
+      document.getElementById('run-btn').disabled = false;
+      return;
+    }
+    paretoData = ev.pareto.solutions || [];
+    console.log('Pareto solutions:', paretoData.length, paretoData[0]);
+    if (paretoData.length === 0) {
+      log('WARNING: Pareto front is empty — all evaluations may have failed');
+      document.getElementById('run-btn').disabled = false;
+      return;
+    }
+    document.getElementById('progress-bar').style.width      = '100%';
+    document.getElementById('progress-bar').style.background = '#16a34a';
+    document.getElementById('iter-counter').textContent      = 'complete';
+    document.getElementById('pareto-count').textContent      = `${paretoData.length} solutions`;
+    log(`GD complete: ${paretoData.length} Pareto solutions · ` +
+        `${ev.pareto.n_evaluations} evals · ${ev.pareto.wall_time_s?.toFixed(0)}s`);
+    requestAnimationFrame(() => {
+      initParetoChart();
+      updateParetoChart();
+      renderSolutionList();
+    });
+    document.getElementById('run-btn').disabled = false;
+
+  } else if (ev.type === 'error') {
+    stopGDTimer();
+    log('ERROR: ' + ev.message);
+    console.error(ev.trace);
+  }
+}
+
+// ── Pareto chart ──────────────────────────────────────────────────────────
+function initParetoChart() {
+  const panel  = document.getElementById('pareto-panel');
+  const canvas = document.getElementById('pareto-chart');
+  if (!canvas) return;
+  panel.style.display = 'block';
+  if (paretoChart) { paretoChart.destroy(); paretoChart = null; }
+  paretoChart = new Chart(canvas.getContext('2d'), {
+    type: 'scatter',
+    data: { datasets: [
+      { label: 'Evaluated',
+        data: [],
+        backgroundColor: 'rgba(90,100,120,0.30)',
+        pointRadius: 4, pointHoverRadius: 6,
+      },
+      { label: 'Pareto front',
+        data: [],
+        backgroundColor: '#00d4aa',
+        borderColor:     '#00d4aa',
+        pointRadius: 7, pointHoverRadius: 10,
+      },
+    ]},
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 300 },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => {
+          if (ctx.datasetIndex !== 1) return [];
+          const s = paretoData[ctx.dataIndex];
+          if (!s) return [];
+          return [
+            `C: ${s.compliance_Nm?.toExponential(2)} N·m`,
+            `m: ${s.mass_kg?.toFixed(3)} kg`,
+            `Vf: ${(s.volume_fraction * 100).toFixed(0)}%`,
+          ];
+        }}}
+      },
+      scales: {
+        x: { ticks:{color:'#555',font:{size:10}}, grid:{color:'#1a1a24'},
+             title:{display:true,color:'#666',font:{size:10},text:'Compliance (N·m)'} },
+        y: { ticks:{color:'#555',font:{size:10}}, grid:{color:'#1a1a24'},
+             title:{display:true,color:'#666',font:{size:10},text:'Mass (kg)'} },
+      },
+      onClick: (e, els) => {
+        if (!els.length || els[0].datasetIndex !== 1) return;
+        selectSolution(els[0].index);
+      }
+    }
+  });
+  console.log('Pareto chart initialised, canvas:', canvas.width, 'x', canvas.height);
+}
+
+function updateParetoChart() {
+  if (!paretoChart) {
+    console.warn('updateParetoChart: chart not ready, retrying...');
+    setTimeout(updateParetoChart, 100);
+    return;
+  }
+  if (!paretoData.length) return;
+
+  const xi = parseInt(document.getElementById('pareto-x-axis')?.value || 0);
+  const yi = parseInt(document.getElementById('pareto-y-axis')?.value || 1);
+  const keys   = ['compliance_Nm', 'mass_kg', 'support_volume_m3'];
+  const labels = ['Compliance (N·m)', 'Mass (kg)', 'Support vol (m³)'];
+
+  paretoChart.data.datasets[0].data = paretoData.map(s => ({x: s[keys[xi]], y: s[keys[yi]]}));
+  paretoChart.data.datasets[1].data = paretoData.map(s => ({x: s[keys[xi]], y: s[keys[yi]]}));
+  paretoChart.options.scales.x.title.text = labels[xi];
+  paretoChart.options.scales.y.title.text = labels[yi];
+  paretoChart.update();
+  console.log('Pareto chart updated:', paretoData.length, 'solutions plotted');
+}
+
+// ── Solution list ─────────────────────────────────────────────────────────
+function formatLoad(N) {
+  if (N >= 1e6)  return (N / 1e6).toFixed(2) + ' MN';
+  if (N >= 1e3)  return (N / 1e3).toFixed(1) + ' kN';
+  return N.toFixed(0) + ' N';
+}
+
+function renderSolutionList() {
+  const el = document.getElementById('solution-list');
+  if (!paretoData.length) {
+    el.innerHTML = '<div style="font-size:11px;color:#2a2a38;padding:8px">No solutions yet</div>';
+    return;
+  }
+  el.innerHTML = paretoData.map((s, i) => {
+    const loadCap   = s.max_load_N != null ? formatLoad(s.max_load_N) : '—';
+    const loadColor = s.max_load_N != null ? '#00d4aa' : '#3a3a48';
+    return `
+    <div class="solution-item ${selectedSolId === i ? 'selected' : ''}"
+         id="sol-item-${i}"
+         onclick="selectSolution(${i})">
+      <span class="sol-id">#${i}</span>
+      <div class="sol-objs">
+        <div class="sol-obj">
+          <div class="sol-obj-val">${s.compliance_Nm?.toExponential(2)}</div>
+          <div class="sol-obj-lbl">N·m</div>
+        </div>
+        <div class="sol-obj">
+          <div class="sol-obj-val">${s.mass_kg?.toFixed(3)}</div>
+          <div class="sol-obj-lbl">kg</div>
+        </div>
+        <div class="sol-obj">
+          <div class="sol-obj-val">${(s.volume_fraction * 100).toFixed(0)}%</div>
+          <div class="sol-obj-lbl">Vf</div>
+        </div>
+        <div class="sol-obj" title="Max load before yielding">
+          <div class="sol-obj-val" style="color:${loadColor}">${loadCap}</div>
+          <div class="sol-obj-lbl">F<sub>max</sub></div>
+        </div>
+      </div>
+      <button class="sol-load-btn"
+              onclick="event.stopPropagation();loadSolution(${i})">
+        Load STL
+      </button>
+    </div>`;
+  }).join('');
+}
+
+function updateSolutionRow(idx) {
+  const s   = paretoData[idx];
+  if (!s) return;
+  const cap = document.querySelector(`#sol-item-${idx} .sol-obj:nth-child(4) .sol-obj-val`);
+  if (!cap) return;
+  if (s.max_load_N != null) {
+    cap.textContent = formatLoad(s.max_load_N);
+    cap.style.color = '#00d4aa';
+  }
+}
+
+function selectSolution(idx) {
+  selectedSolId = idx;
+  renderSolutionList();
+  if (paretoChart) {
+    paretoChart.data.datasets[0].backgroundColor =
+      paretoData.map((_, i) => i === idx ? '#ff8800' : '#00d4aa');
+    paretoChart.update('none');
+  }
+  const s = paretoData[idx];
+  if (s) log(`Selected solution #${idx}: C=${s.compliance_Nm?.toExponential(2)}, m=${s.mass_kg?.toFixed(3)}kg, Vf=${s.volume_fraction?.toFixed(2)}`);
+}
+
+async function loadSolution(idx) {
+  const s = paretoData[idx];
+  if (!s || !inputSTLb64) return;
+
+  selectSolution(idx);
+  log(`Loading solution #${idx} (Vf=${(s.volume_fraction*100).toFixed(0)}%, ` +
+      `mfs=${s.min_feature_size?.toFixed(1)})...`);
+
+  const wrap = document.getElementById('sol-progress-wrap');
+  wrap.style.display = 'block';
+  document.getElementById('sol-progress-bar').style.width = '0%';
+  document.getElementById('sol-progress-bar').style.background = '#4080c0';
+  document.getElementById('sol-progress-iter').textContent =
+    `0 / ${document.getElementById('max-iter').value}`;
+  document.getElementById('sol-progress-label').textContent =
+    `Solution #${idx} — Vf=${(s.volume_fraction*100).toFixed(0)}%`;
+
+  initSolComplianceChart();
+  document.getElementById('sol-log-inner').innerHTML     = '';
+  document.getElementById('run-btn').disabled = true;
+
+  const bcData = collectBCsForRequest();
+  const body = {
+    stl_b64:      inputSTLb64,
+    design_params: {
+      volume_fraction:       s.volume_fraction,
+      overhang_weight:       s.overhang_weight,
+      build_orientation_deg: s.build_orientation_deg,
+      min_feature_size:      s.min_feature_size,
+    },
+    material:    document.getElementById('material').value,
+    nx:          parseInt(document.getElementById('nx').value),
+    ny:          parseInt(document.getElementById('ny').value),
+    nz:          parseInt(document.getElementById('nz').value),
+    simp_iter:   parseInt(document.getElementById('max-iter').value),
+    fixed_faces: bcData.fixed_faces,
+    loads:       bcData.loads,
+  };
+
+  try {
+    const res    = await fetch(`${API}/reconstruct_solution`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const reader = res.body.getReader();
+    const dec    = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try { handleSolEvent(JSON.parse(line.slice(6))); } catch {}
+      }
+    }
+  } catch (err) {
+    log('Load error: ' + err.message);
+  }
+
+  document.getElementById('run-btn').disabled = false;
+}
+
+function solLog(msg) {
+  const el = document.getElementById('sol-log-inner');
+  const p  = document.createElement('p');
+  p.textContent = msg;
+  el.appendChild(p);
+  el.scrollTop = el.scrollHeight;
+}
+
+function handleSolEvent(ev) {
+  if (ev.type === 'status') {
+    document.getElementById('sol-progress-label').textContent = ev.message;
+    solLog(ev.message);
+
+  } else if (ev.type === 'progress') {
+    const pct = Math.round((ev.iteration / ev.max_iter) * 100);
+    document.getElementById('sol-progress-bar').style.width = pct + '%';
+    document.getElementById('sol-progress-iter').textContent =
+      `Iter ${ev.iteration} / ${ev.max_iter}  C=${ev.compliance.toExponential(2)}`;
+    if (ev.iteration % 5 === 0 || ev.iteration === 1)
+      solLog(`Iter ${ev.iteration} / ${ev.max_iter}  C=${ev.compliance.toExponential(3)}`);
+    if (solComplianceChart) {
+      solComplianceChart.data.labels.push(ev.iteration);
+      solComplianceChart.data.datasets[0].data.push(ev.compliance);
+      solComplianceChart.update('none');
+    }
+
+  } else if (ev.type === 'done') {
+    document.getElementById('sol-progress-bar').style.width      = '100%';
+    document.getElementById('sol-progress-bar').style.background = '#16a34a';
+    document.getElementById('sol-progress-iter').textContent     = 'complete ✓';
+
+    const label = `Solution #${selectedSolId} · ` +
+      `Vf=${(paretoData[selectedSolId]?.volume_fraction * 100).toFixed(0)}%`;
+
+    const domInfo = {
+      nx:   parseInt(document.getElementById('nx').value),
+      ny:   parseInt(document.getElementById('ny').value),
+      nz:   parseInt(document.getElementById('nz').value),
+      lx_m: currentDomainLx,
+      ly_m: currentDomainLy,
+      lz_m: currentDomainLz,
+    };
+
+    // Load into the in-app Result tab viewer
+    if (!sceneOut) {
+      const viewerEl = document.getElementById('viewer-out');
+      viewerEl.innerHTML = '<div class="info-bar" id="info-out" style="display:none"></div>';
+      sceneOut = makeViewer('viewer-out');
+    }
+    loadSTLIntoViewer(ev.stl_b64, sceneOut, 'info-out');
+
+    snapshots   = ev.snapshots  || [];
+    snapIters   = ev.snap_iters || [];
+    domainInfo  = ev.domain || {
+      nx: parseInt(document.getElementById('nx').value),
+      ny: parseInt(document.getElementById('ny').value),
+      nz: parseInt(document.getElementById('nz').value),
+      lx_m: currentDomainLx, ly_m: currentDomainLy, lz_m: currentDomainLz,
+    };
+    stressData  = ev.stress_b64 ? decodeF32(ev.stress_b64) : null;
+    thermalData = ev.temp_b64   ? decodeF32(ev.temp_b64)   : null;
+
+    // Enable/disable view buttons based on available data
+    const hasDensity = snapshots.length > 0;
+    const bd = document.getElementById('btn-density');
+    if (bd) { bd.style.opacity = hasDensity ? '1' : '0.35'; bd.disabled = !hasDensity; }
+    if (hasDensity) {
+      const sl = document.getElementById('iter-slider');
+      sl.max   = snapshots.length - 1;
+      sl.value = snapshots.length - 1;
+    }
+    ['stress', 'thermal'].forEach(m => {
+      const hasData = m === 'stress' ? stressData : thermalData;
+      const b = document.getElementById('btn-' + m);
+      if (b) { b.style.opacity = hasData ? '1' : '0.35'; b.disabled = !hasData; }
+    });
+
+    // Compute max load capacity from safety factor
+    if (ev.safety_factor != null && selectedSolId != null) {
+      const loadMag = Math.abs(
+        parseFloat(document.getElementById('load-mag')?.value || 0)
+      );
+      const sf   = parseFloat(ev.safety_factor);
+      const fMax = isFinite(sf) && sf > 0 && sf < 1e6 ? sf * loadMag : null;
+      if (paretoData[selectedSolId]) {
+        paretoData[selectedSolId].max_load_N = fMax;
+      }
+      updateSolutionRow(selectedSolId);
+      if (fMax != null) {
+        solLog(`Max load capacity: ${formatLoad(fMax)} (SF=${sf.toFixed(2)})`);
+      }
+    }
+
+    solLog(`Done · C=${ev.compliance_Nm?.toExponential(2)} N·m  m=${ev.mass_kg?.toFixed(3)} kg`);
+    log(`Solution #${selectedSolId} loaded · C=${ev.compliance_Nm?.toExponential(2)} N·m  m=${ev.mass_kg?.toFixed(3)} kg`);
+    setResultTab('result');
+    setViewMode('stl');
+
+    // Auto-download
+    const a    = document.createElement('a');
+    const blob = new Blob(
+      [Uint8Array.from(atob(ev.stl_b64), c => c.charCodeAt(0))],
+      { type: 'application/octet-stream' }
+    );
+    a.href = URL.createObjectURL(blob);
+    a.download = `pareto_solution_${selectedSolId}.stl`;
+    a.click();
+
+  } else if (ev.type === 'error') {
+    log('Solution error: ' + ev.message);
+    document.getElementById('sol-progress-bar').style.background = '#ff4d6a';
+  }
+}
+
+
+function initSolComplianceChart() {
+  const canvas = document.getElementById('sol-compliance-chart');
+  const ctx    = canvas.getContext('2d');
+  if (solComplianceChart) { solComplianceChart.destroy(); solComplianceChart = null; }
+  solComplianceChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: [], datasets: [{
+      data: [], borderColor: '#4080c0',
+      backgroundColor: 'rgba(64,128,192,0.1)',
+      borderWidth: 1.5, pointRadius: 0, tension: 0.3, fill: true,
+    }]},
+    options: {
+      responsive: false,
+      animation: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: {
+          ticks: { color: '#555', font: { size: 9 },
+                   callback: v => v.toExponential(1) },
+          grid: { color: '#111' },
+        },
+      },
+    },
+  });
 }
 
 // ── Mechanical report render ─────────────────────────────────────────────

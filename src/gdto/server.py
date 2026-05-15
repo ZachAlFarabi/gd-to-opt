@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import os
 import json
 import queue as _queue
 import tempfile
@@ -34,6 +35,7 @@ from pydantic import BaseModel, Field
 from gdto.mesh_material import build_problem, build_problem_dynamic, MaterialModel
 from gdto.simp import run_simp, SIMPConfig, ThermalConfig
 from gdto.reconstruct import reconstruct_stl, stl_to_base64, base64_to_stl, stl_to_voxels
+from gdto.gd_loop import run_gd, GDConfig, GDResult
 from gdto.verify import verify, THERMAL_CONSTANTS
 from gdto.bc_projection import BCProjector, SurfacePatch, flood_fill_patch
 
@@ -109,6 +111,36 @@ class VerifyRequest(BaseModel):
     nz:            int   = 20
     fixed_faces:   list[str] = ["zmin"]
     loads:         list[LoadConfig] = []
+
+
+class GDRequest(BaseModel):
+    """Request body for /gd_optimise endpoint."""
+    stl_b64:         str
+    material:        str   = "Ti64"
+    nx:              int   = Field(20, ge=4, le=40)   # single-run mesh
+    ny:              int   = Field(20, ge=4, le=40)
+    nz:              int   = Field(20, ge=4, le=40)
+    gd_nx:           int   = Field(12, ge=4, le=20)   # GD exploration mesh
+    gd_ny:           int   = Field(10, ge=4, le=20)
+    gd_nz:           int   = Field(8,  ge=4, le=20)
+    pop_size:        int   = Field(20, ge=4, le=200)
+    n_gen:           int   = Field(3,  ge=1, le=20)
+    simp_iter:       int   = Field(15, ge=5, le=100)
+    fixed_faces:     list[str] = ["zmin"]
+    loads:           list[LoadConfig] = []
+
+
+class ReconstructRequest(BaseModel):
+    """Request to reconstruct STL for one Pareto solution."""
+    stl_b64:         str        # original input STL (for voxelisation)
+    design_params:   dict       # volume_fraction, overhang_weight, etc.
+    material:        str  = "Ti64"
+    nx:              int  = 20
+    ny:              int  = 20
+    nz:              int  = 20
+    simp_iter:       int  = 80
+    fixed_faces:     list[str] = ["zmin"]
+    loads:           list[LoadConfig] = []
 
 
 # ---------------------------------------------------------------------------
@@ -193,9 +225,19 @@ def _build_dynamic_bcs(
     return f_struct, f_therm, fixed_dofs, fixed_vals
 
 
+class _NumpyEncoder(json.JSONEncoder):
+    """Converts numpy scalars/arrays to Python natives for JSON serialisation."""
+    def default(self, obj):
+        if isinstance(obj, np.integer):  return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.ndarray):  return obj.tolist()
+        if isinstance(obj, np.bool_):    return bool(obj)
+        return super().default(obj)
+
+
 def _sse(data: dict) -> str:
-    """Format a dict as an SSE data line."""
-    return f"data: {json.dumps(data)}\n\n"
+    """Format a dict as an SSE data line (numpy-safe)."""
+    return f"data: {json.dumps(data, cls=_NumpyEncoder)}\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +466,8 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
                 "stress_b64": stress_b64,
                 "temp_b64":   temp_b64,
                 "domain": {
-                    "nx": req.nx, "ny": req.ny, "nz": req.nz,
+                    "nx": req.nx, "ny": req.ny,
+                      "nz": req.nz,
                     "lx_m": lx, "ly_m": ly, "lz_m": lz,
                 },
             })
@@ -434,8 +477,164 @@ async def _optimise_stream(req: OptimiseRequest) -> AsyncGenerator[str, None]:
 
 
 # ---------------------------------------------------------------------------
+# SSE generator for /gd_optimise
+# ---------------------------------------------------------------------------
+
+async def _gd_stream(req: GDRequest) -> AsyncGenerator[str, None]:
+    """
+    Run full NSGA-II GD loop and stream SSE events.
+
+    Events:
+        {type: "status",      message: str}
+        {type: "domain",      info: dict}
+        {type: "gd_progress", n_gen: int, n_eval: int, n_pareto: int, wall_time: float}
+        {type: "done",        pareto: dict}
+        {type: "error",       message: str, trace: str}
+    """
+    try:
+        yield _sse({"type": "status", "message": "Decoding STL..."})
+        await asyncio.sleep(0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_stl = Path(tmpdir) / "input.stl"
+            base64_to_stl(req.stl_b64, in_stl)
+
+            yield _sse({"type": "status", "message": "Voxelising design domain..."})
+            await asyncio.sleep(0)
+
+            rho_init, domain_info = stl_to_voxels(
+                in_stl, nx=req.nx, ny=req.ny, nz=req.nz
+            )
+            lx = domain_info["lx_m"]
+            ly = domain_info["ly_m"]
+            lz = domain_info["lz_m"]
+
+            yield _sse({"type": "domain", "info": domain_info})
+            await asyncio.sleep(0)
+
+            (load_face, load_magnitude, load_direction,
+             flux_faces, temp_faces, _extra) = _parse_loads(req.loads)
+
+            gd_cfg = GDConfig(
+                pop_size    = req.pop_size,
+                n_gen       = req.n_gen,
+                simp_iter   = req.simp_iter,
+                simp_tol    = 5e-2,
+                mesh_nx     = req.gd_nx,
+                mesh_ny     = req.gd_ny,
+                mesh_nz     = req.gd_nz,
+                material    = req.material,
+                fixed_faces = req.fixed_faces,
+                load_face   = load_face,
+                load_dir    = load_direction,
+                load_mag    = load_magnitude,
+                lx=lx, ly=ly, lz=lz,
+                flux_faces  = flux_faces,
+                temp_faces  = temp_faces,
+            )
+
+            n_jobs = max(1, (os.cpu_count() or 4) // 2)
+            yield _sse({
+                "type":    "status",
+                "message": f"Starting NSGA-II: pop={req.pop_size}, gen={req.n_gen}, "
+                           f"est. {req.pop_size * req.n_gen} evaluations, "
+                           f"{n_jobs} parallel workers",
+            })
+            await asyncio.sleep(0)
+
+            yield _sse({"type": "status", "message": "Running NSGA-II..."})
+            await asyncio.sleep(0)
+
+            import queue as _queue
+            import threading as _threading
+            import time as _time
+
+            event_q          = _queue.Queue()
+            stop_evt         = _threading.Event()
+            result_container = [None]
+            error_container  = [None]
+
+            def callback(ev: dict):
+                event_q.put(ev)
+
+            def heartbeat():
+                t_start = _time.time()
+                while not stop_evt.wait(timeout=3):
+                    event_q.put({
+                        "type":    "heartbeat",
+                        "elapsed": round(_time.time() - t_start, 1),
+                    })
+
+            def run_in_thread():
+                try:
+                    result_container[0] = run_gd(gd_cfg, progress_callback=callback)
+                except Exception as e:
+                    error_container[0] = e
+                finally:
+                    stop_evt.set()
+                    event_q.put({"type": "_done_sentinel"})
+
+            _threading.Thread(target=run_in_thread, daemon=True).start()
+            _threading.Thread(target=heartbeat,      daemon=True).start()
+
+            while True:
+                try:
+                    ev = await asyncio.get_event_loop().run_in_executor(
+                        None, lambda: event_q.get(timeout=1.0)
+                    )
+                except Exception:
+                    await asyncio.sleep(0)
+                    continue
+
+                if ev.get("type") == "_done_sentinel":
+                    break
+
+                yield _sse(ev)
+                yield ""          # flush ASGI send buffer immediately
+                await asyncio.sleep(0)
+
+            stop_evt.set()
+
+            if error_container[0]:
+                raise error_container[0]
+
+            gd_result: GDResult = result_container[0]
+
+            yield _sse({
+                "type":      "gd_progress",
+                "n_gen":     gd_result.n_generations,
+                "n_eval":    gd_result.n_evaluations,
+                "n_pareto":  len(gd_result.pareto_solutions),
+                "wall_time": round(gd_result.wall_time_s, 1),
+            })
+
+            yield _sse({"type": "status", "message": "Pareto front complete. Sending results..."})
+            await asyncio.sleep(0)
+
+            result_dict = gd_result.to_dict()
+
+            import logging as _logging
+            _logging.getLogger(__name__).info(
+                f"GD done: {len(gd_result.pareto_solutions)} solutions, "
+                f"{gd_result.n_evaluations} evals, {gd_result.wall_time_s:.1f}s"
+            )
+
+            yield _sse({"type": "done", "pareto": result_dict})
+            yield ""               # flush ASGI send buffer
+            await asyncio.sleep(0.2)
+
+    except Exception as e:
+        yield _sse({"type": "error", "message": str(e), "trace": traceback.format_exc()})
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    pass  # joblib loky workers are daemon processes — exit automatically
+
 
 @app.get("/health")
 async def health():
@@ -547,3 +746,203 @@ async def verify_endpoint(req: VerifyRequest):
         )
         result = verify(dummy, problem, flux_faces=flux_faces, temp_faces=temp_faces)
         return result.report
+
+
+@app.post("/gd_optimise")
+async def gd_optimise(req: GDRequest):
+    """Run full NSGA-II generative design loop with SSE streaming."""
+    return StreamingResponse(
+        _gd_stream(req),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+@app.post("/reconstruct_solution")
+async def reconstruct_solution(req: ReconstructRequest):
+    """
+    Reconstruct STL for one Pareto solution with live SIMP progress.
+    Streams SSE events during the solve then emits a final 'done' event.
+    """
+    return StreamingResponse(
+        _reconstruct_stream(req),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control":               "no-cache",
+            "X-Accel-Buffering":           "no",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+
+
+async def _reconstruct_stream(req: ReconstructRequest):
+    try:
+        yield _sse({"type": "status", "message": "Preparing solution..."})
+        await asyncio.sleep(0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_stl  = Path(tmpdir) / "input.stl"
+            out_stl = Path(tmpdir) / "solution.stl"
+            base64_to_stl(req.stl_b64, in_stl)
+
+            rho_init, domain_info = stl_to_voxels(
+                in_stl, nx=req.nx, ny=req.ny, nz=req.nz,
+                volume_fraction=req.design_params.get("volume_fraction", 0.4),
+            )
+            lx = domain_info["lx_m"]
+            ly = domain_info["ly_m"]
+            lz = domain_info["lz_m"]
+
+            yield _sse({"type": "status",
+                        "message": f"Building FE problem ({req.nx}×{req.ny}×{req.nz} mesh)..."})
+            await asyncio.sleep(0)
+
+            (load_face, load_magnitude, load_direction,
+             flux_faces, temp_faces, _extra) = _parse_loads(req.loads)
+
+            problem = build_problem(
+                material       = req.material,
+                nx=req.nx, ny=req.ny, nz=req.nz,
+                lx=lx, ly=ly, lz=lz,
+                fixed_faces    = req.fixed_faces,
+                load_face      = load_face,
+                load_direction = load_direction,
+                load_magnitude = load_magnitude,
+            )
+
+            max_iter = req.simp_iter if req.simp_iter else 80
+            cfg = SIMPConfig(
+                max_iter        = max_iter,
+                tol             = 1e-3,
+                volume_fraction = req.design_params.get("volume_fraction", 0.4),
+                filter_radius   = req.design_params.get("min_feature_size", 1.5),
+                update_scheme   = "auto",
+                p_start         = 2.0,
+                p_end           = 3.0,
+            )
+            thermal_cfg = ThermalConfig(flux_faces=flux_faces, temp_faces=temp_faces)
+
+            yield _sse({"type": "status", "message": f"Running SIMP ({max_iter} iterations)..."})
+            await asyncio.sleep(0)
+
+            event_q    = _queue.Queue()
+            result_box = [None]
+            error_box  = [None]
+
+            def _simp_callback(iteration, compliance, change):
+                event_q.put({
+                    "type":       "progress",
+                    "iteration":  int(iteration),
+                    "max_iter":   max_iter,
+                    "compliance": float(compliance),
+                    "change":     float(change),
+                })
+
+            def _run_simp_thread():
+                try:
+                    result_box[0] = run_simp(
+                        problem,
+                        config            = cfg,
+                        thermal_cfg       = thermal_cfg,
+                        design_params     = req.design_params,
+                        progress_callback = _simp_callback,
+                    )
+                except Exception as e:
+                    error_box[0] = e
+                finally:
+                    event_q.put({"type": "_sentinel"})
+
+            threading.Thread(target=_run_simp_thread, daemon=True).start()
+
+            while True:
+                try:
+                    ev = event_q.get(timeout=1.0)
+                except _queue.Empty:
+                    await asyncio.sleep(0)
+                    continue
+
+                if ev.get("type") == "_sentinel":
+                    break
+
+                yield _sse(ev)
+                await asyncio.sleep(0)
+
+            if error_box[0]:
+                raise error_box[0]
+
+            result = result_box[0]
+
+            yield _sse({"type": "status", "message": "Reconstructing geometry..."})
+            await asyncio.sleep(0)
+
+            stl_info = reconstruct_stl(result.rho, problem.mesh, out_stl)
+            stl_b64  = stl_to_base64(out_stl)
+
+            # ── Verification FEA (stress + thermal fields) ────────────
+            yield _sse({"type": "status", "message": "Running verification FEA..."})
+            await asyncio.sleep(0)
+
+            loop = asyncio.get_event_loop()
+            verify_result = await loop.run_in_executor(
+                None, lambda: verify(
+                    result, problem,
+                    stl_path            = out_stl,
+                    flux_faces          = flux_faces,
+                    temp_faces          = temp_faces,
+                    T_field_precomputed = getattr(result, 'T_field_final', None),
+                )
+            )
+
+            # ── Encode density snapshots ──────────────────────────────
+            encoded_snaps = []
+            encoded_iters = []
+            if result.density_snapshots:
+                for snap in result.density_snapshots:
+                    encoded_snaps.append(
+                        base64.b64encode(snap.tobytes()).decode()
+                    )
+                encoded_iters = result.snapshot_iters or []
+
+            # ── Encode stress / thermal fields ────────────────────────
+            stress_b64 = None
+            temp_b64   = None
+            if verify_result.stress_field_mpa is not None:
+                stress_b64 = base64.b64encode(
+                    verify_result.stress_field_mpa.astype(np.float32).tobytes()
+                ).decode()
+            if verify_result.temp_field_c is not None:
+                temp_b64 = base64.b64encode(
+                    verify_result.temp_field_c.astype(np.float32).tobytes()
+                ).decode()
+
+            sf = None
+            if verify_result and verify_result.min_safety_factor:
+                sf_val = verify_result.min_safety_factor
+                sf = float(sf_val) if sf_val != float('inf') else None
+
+            yield _sse({
+                "type":              "done",
+                "stl_b64":           stl_b64,
+                "stl_info":          stl_info,
+                "stress_b64":        stress_b64,
+                "temp_b64":          temp_b64,
+                "snapshots":         encoded_snaps,
+                "snap_iters":        encoded_iters,
+                "compliance_Nm":     float(result.compliance),
+                "mass_kg":           float(result.mass),
+                "support_volume_m3": float(result.support_volume),
+                "safety_factor":     sf,
+                "domain": {
+                    "nx": req.nx, "ny": req.ny, "nz": req.nz,
+                    "lx_m": lx, "ly_m": ly, "lz_m": lz,
+                },
+            })
+            await asyncio.sleep(0.1)
+
+    except Exception as e:
+        yield _sse({"type": "error", "message": str(e),
+                    "trace": traceback.format_exc()})
